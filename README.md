@@ -34,7 +34,8 @@ Before you point it at a real container:
 - **Where pushes go:** into a GTM *workspace*, never the live container. Publishing is a separate command that makes you type the container id.
 - **Where your tokens live:** your OS keychain (VS Code SecretStorage), or `~/.config/gs-code/` for the CLI, where `client.json` and `tokens.json` have file mode 600.
 - **Who it talks to:** the Tag Manager API on `googleapis.com` and Google's OAuth endpoints, through your own OAuth client. The debugger drives a browser on your machine, and only sends requests to your own server container (a host you list in `gsCode.debug.sgtmHosts`) when you ask it to replay one. No server of mine, no analytics, no telemetry, no paid service anywhere.
-- **Try it safely first:** set `allowPublish` to `false`, sign in, and open a new workspace on a test container. Pull and look around before you push anything.
+- **Try it safely first:** set `allowPublish` to `false`, sign in, and open a new workspace on a test container. Pull and look around before you push anything. Any Google account can create a free test container at tagmanager.google.com in a minute.
+- **For an IT or security review:** [SECURITY.md](SECURITY.md) lists everything GS Code stores, where, and what it sends. The code is MIT licensed and the CI runs in the open.
 
 ## What it does
 
@@ -359,7 +360,7 @@ More on the debugger's limits in [docs/debugger.md](docs/debugger.md). If someth
 - [docs/file-format.md](docs/file-format.md): the file format
 - [docs/troubleshooting.md](docs/troubleshooting.md): common problems
 - [docs/debugger-design.md](docs/debugger-design.md): how the debugger works inside
-- [SECURITY.md](SECURITY.md): reporting a vulnerability
+- [SECURITY.md](SECURITY.md): what GS Code stores and sends, and how to report a vulnerability
 - [CONTRIBUTING.md](CONTRIBUTING.md): working on GS Code
 - [CHANGELOG.md](CHANGELOG.md): what changed
 
