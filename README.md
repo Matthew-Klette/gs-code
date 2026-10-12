@@ -1,10 +1,10 @@
 # GS Code
 
-**Edit a Google Tag Manager workspace as plain files in VS Code. Bulk edit, diff, push to a workspace. Nothing goes live until you publish it.**
+**Edit a Google Tag Manager workspace as plain files in VS Code. Bulk edit, diff, push to a workspace, and debug it in a real browser. Nothing goes live until you publish it.**
 
 Free, MIT licensed, no account and no server. An independent project, not made by or affiliated with Google.
 
-GS Code mirrors an entire GTM workspace (web or server-side) into a folder of plain files. You edit tags, triggers, variables and custom templates with everything VS Code is good at — search and replace across the whole container, multi-cursor, git, diffs, AI agents — then **Push** the changes back to GTM and **Publish** when you are ready.
+GS Code mirrors an entire GTM workspace (web or server-side) into a folder of plain files. You edit tags, triggers, variables and custom templates with everything VS Code is good at: search and replace across the whole container, multi-cursor, git, diffs, AI agents. Then you **Push** the changes back to GTM, check them in the **Debugger** against your real site before anything is published, and **Publish** when you are ready.
 
 ![GS Code: Source Control view listing GTM changes, with a side-by-side diff of a tag](media/screenshot.png)
 
@@ -22,7 +22,9 @@ The GTM web UI is built for editing one thing at a time. Real tagging work rarel
 
 Container export / import helps a little, but the export is one giant JSON file full of numeric ids, and importing it back risks overwriting someone else's work.
 
-**GS Code turns the workspace into a normal project folder.** One readable file per entity, references by name instead of id, real `.html` / `.js` files for code, a safe sync that never silently overwrites anyone, and a Source Control view that shows exactly what Push will send.
+And when a tag does not fire, GTM's preview tells you *that* it did not, not *why*.
+
+**GS Code turns the workspace into a normal project folder.** One readable file per entity, references by name instead of id, real `.html` / `.js` files for code, a safe sync that never silently overwrites anyone, and a Source Control view that shows exactly what Push will send. Its debugger records what your page does and tells you which trigger file and which condition decided each tag.
 
 ## What it can touch
 
@@ -31,7 +33,7 @@ Before you point it at a real container:
 - **Scopes requested:** `tagmanager.readonly`, `tagmanager.edit.containers`, `tagmanager.edit.containerversions`, and `tagmanager.publish` only if publishing is enabled. Set `gsCode.allowPublish: false` and the publish scope is never requested.
 - **Where pushes go:** into a GTM *workspace*, never the live container. Publishing is a separate command that makes you type the container id.
 - **Where your tokens live:** your OS keychain (VS Code SecretStorage), or `~/.config/gs-code/` with file mode 600 for the CLI.
-- **Who it talks to:** only `googleapis.com`, through your own OAuth client. No server of mine, no analytics, no telemetry. The only runtime dependency is Google's `google-auth-library`.
+- **Who it talks to:** the Tag Manager API on `googleapis.com`, through your own OAuth client. The debugger drives a browser on your machine, and only sends requests to your own server container when you ask it to replay one. No server of mine, no analytics, no telemetry, no paid service anywhere.
 - **Try it safely first:** set `allowPublish` to `false`, sign in, and open a new workspace on a test container. Pull and look around before you push anything.
 
 ## What it does
@@ -46,13 +48,19 @@ Before you point it at a real container:
 | **Safe sync** | Pull is a three-way merge: untouched files update, your edits are kept, anything changed both locally and in GTM becomes a conflict you resolve (Keep Mine / Take Theirs). Push re-checks GTM first and refuses to overwrite a change someone made since your last pull. |
 | **Fast pushes** | All changes go in one `workspaces.bulk_update` call (GTM allows only 0.25 API requests per second). |
 | **Versions and publishing** | Create Version, or Create Version and Publish, with a typed container-id confirmation, a blocklist for containers you never want published from here, and a no-publish sign-in mode. |
+| **Debugger** | Load your *unpublished* workspace on your real site, see every dataLayer event, tag status, consent state and network hit, and get the reason each tag fired or did not, linked to the file to fix. [More](docs/debugger.md) |
+| **AI agents** | Every operation and the debugger are tools: Copilot uses them inside VS Code, Claude Code, Cursor and other MCP clients through `gscode mcp`. Agents can push to a workspace; only you can publish. |
+| **Teams** | Share a mirror through git: each person links the same files to their own workspace (`--adopt`). Push and versioning check GTM again right before they write, and never overwrite a teammate's change. [More](docs/team.md) |
 | **CLI** | `gscode` does everything the extension does, for scripts, CI and terminal AI agents. |
 
 ## Getting started
 
 ### 1. Install
 
-GS Code is not on the VS Code Marketplace yet. Download `gs-code-0.1.0.vsix` from [Releases](https://github.com/Matthew-Klette/gs-code/releases), then in VS Code run **Extensions: Install from VSIX…** and pick the file. (Or build it yourself, see [Development](#development).)
+- **VS Code, Cursor, VSCodium, Windsurf:** search for **GS Code** in Extensions (VS Code Marketplace and Open VSX), or download the `.vsix` from [Releases](https://github.com/Matthew-Klette/gs-code/releases) and run **Extensions: Install from VSIX…**.
+- **CLI:** `npm install -g gs-code` (Node 20+), then `gscode --help`.
+
+The first run opens a short walkthrough (**Help → Welcome → Get started with GS Code**).
 
 ### 2. Create a Google OAuth client (one time, about 10 minutes)
 
@@ -71,7 +79,9 @@ GS Code talks to the Tag Manager API with **your** Google account through **your
 
 Command Palette (`⇧⌘P` / `Ctrl+Shift+P`) → **GS Code: Configure OAuth Client** → pick the downloaded JSON → **Sign In**.
 
-Google shows "Google hasn't verified this app" because the app is yours and in testing mode; choose **Continue**. Credentials are stored in your OS keychain (VS Code SecretStorage).
+Google shows "Google hasn't verified this app" because the app is yours and in testing mode; choose **Continue**. Credentials are stored in your OS keychain (VS Code SecretStorage). The status bar tooltip shows which Google account is signed in.
+
+Working over **Remote-SSH, WSL, a Dev Container or Codespaces**? Sign-in works there too. If the browser ends on a "can't connect" page, paste that page's address into the box GS Code shows. **Sign Out** revokes the sign-in at Google; **Remove OAuth Client** forgets the client as well.
 
 ### 4. Open a workspace
 
@@ -87,12 +97,15 @@ A folder named `GTM-XXXXXXX - Workspace name` is created and pulled. Open it; th
 | --- | --- |
 | See what you changed | Source Control view → **GS Code** |
 | Compare a file with GTM | Click it in the Source Control view |
-| Get changes made in GTM | **Pull** (☁↓ in the Source Control title bar) |
+| Get changes made in GTM | Automatic (auto-pull checks every minute), or **Pull** (☁↓) to also bring the workspace up to a newly published version |
 | Send your changes to GTM | **Push** (☁↑) – shows the list and asks first |
 | Throw away a change | ↶ next to the file, or **Discard Changes** |
 | Settle a conflict | Right-click it → **Keep Mine** / **Take Theirs** |
+| Test your changes on your site | **Open Debugger** (bug icon), enter a URL, **Start** |
 | Make a version | `…` → **Create Version** |
 | Go live | `…` → **Create Version and Publish** (type the container id to confirm) |
+| Roll back | `…` → **Versions / Roll Back…** |
+| Follow another workspace | `…` → **Switch Workspace…** (e.g. after a teammate versioned yours) |
 | Jump to the GTM UI | `…` → **Open in Tag Manager** |
 
 ### Bulk edits
@@ -134,11 +147,32 @@ Reference formats: a plain name for triggers and folders, `builtin:All Pages` fo
 - Change `name` inside a file to rename the entity in GTM (the file name doesn't matter).
 - Rename only the file and the entity stays the same.
 - Delete the file to delete the entity.
-- When you rename a trigger or folder, update its references too — one search and replace — and validation will tell you if you missed one.
+- When you rename a trigger or folder, update its references too (one search and replace); validation tells you if you missed one.
+- Renamed something in the GTM UI? **Rename Files to Match GTM** (`gscode tidy`) renames the files too.
+
+Files copied from a container export are fine: export-style spellings like `TEMPLATE` or `TRIGGER_REFERENCE` are converted on push. The full format is in [docs/file-format.md](docs/file-format.md).
+
+### Debugging
+
+![GS Code Debugger: dataLayer events on the left; for the selected event, each tag with whether it fired and the trigger condition that decided it (demo container)](media/debugger.png)
+
+**GS Code: Open Debugger** → enter your site's URL → **Start**. GS Code opens your own Chrome, Edge, Brave or Chromium (it never downloads one) and, in **Workspace draft** mode, loads your *unpublished* workspace on the real site, for you only. Then:
+
+- every dataLayer event, with what was pushed and the data model after it;
+- each tag's status as GTM reports it, and for every tag **why** it fired or not: the trigger, each condition with the value it compared, blocking triggers, consent, pause and schedule, with links to the files;
+- consent state per event and every measurement hit (GA4, Google Ads, Meta, server container…) with its parameters;
+- server containers: requests to your sGTM with the client predicted to claim them, and a replay into your own sGTM preview.
+
+Fix a file, Push, press **Reload**: the draft picks up the change. Details and settings: [docs/debugger.md](docs/debugger.md).
 
 ### Using it with an AI assistant
 
-Because the workspace is just files, any coding agent (Claude Code, Copilot, Cursor …) can read and edit it directly — no GTM API access needed by the agent. Review its changes in the Source Control view, then Push yourself. With the CLI, an agent can also run `gscode status` to check its work.
+The workspace is just files, so any coding agent can read and edit it. GS Code also gives agents tools to check their work in the real world:
+
+- **Copilot (agent mode) in VS Code:** the tools are built in (`#debug_start`, `#debug_explain`, `#gtm_status`, …) and share the Debugger panel's session.
+- **Claude Code, Cursor and other MCP clients:** `claude mcp add gscode -- gscode mcp` (run it in the mirror folder, or pass `--dir`).
+
+A typical loop: *"Why doesn't GA4 - purchase fire on the thank-you page?"* → the agent starts a session, reads the explanation, edits the trigger file, checks `gtm_status`, pushes to the workspace and reloads to confirm. Agents cannot create versions or publish.
 
 ## Safety
 
@@ -149,6 +183,10 @@ GS Code is designed so that nothing reaches GTM, and nothing goes live, without 
 - **Publish** needs you to type the container's public id (`GTM-XXXXXXX`) every time.
 - **`gsCode.protectedContainers`** blocks Create Version and Publish for the containers you list (Pull and Push still work). Keep it in your *User* settings.
 - **`gsCode.allowPublish: false`** + sign in again = a token that physically cannot publish (the `tagmanager.publish` scope is never requested).
+- **Push sends exactly what you confirmed.** If an editor, an agent or another window changes a file between your confirmation and the push, nothing is sent.
+- **Versions contain exactly what you reviewed.** Create Version re-checks GTM first and refuses if the workspace changed since your last pull. Publishing never rolls back a newer live version unless you choose Roll Back.
+- **Background checks never write to GTM.** A newly published version is announced; the workspace is only updated when you Pull.
+- **One process at a time per folder.** The CLI, VS Code windows and agents take turns (`.gtm/lock`), and an interrupted push loses nothing: the next pull finishes it.
 - **Your data stays local.** The mirror folder, your OAuth client and tokens never leave your machine except in calls to Google's Tag Manager API.
 
 ## Settings
