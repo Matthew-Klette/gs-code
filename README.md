@@ -1,6 +1,8 @@
 # GS Code
 
-**Google Studio Code: your Google Tag Manager workspace, as code, in VS Code.**
+**Edit a Google Tag Manager workspace as plain files in VS Code. Bulk edit, diff, push to a workspace. Nothing goes live until you publish it.**
+
+Free, MIT licensed, no account and no server. An independent project, not made by or affiliated with Google.
 
 GS Code mirrors an entire GTM workspace (web or server-side) into a folder of plain files. You edit tags, triggers, variables and custom templates with everything VS Code is good at — search and replace across the whole container, multi-cursor, git, diffs, AI agents — then **Push** the changes back to GTM and **Publish** when you are ready.
 
@@ -22,6 +24,16 @@ Container export / import helps a little, but the export is one giant JSON file 
 
 **GS Code turns the workspace into a normal project folder.** One readable file per entity, references by name instead of id, real `.html` / `.js` files for code, a safe sync that never silently overwrites anyone, and a Source Control view that shows exactly what Push will send.
 
+## What it can touch
+
+Before you point it at a real container:
+
+- **Scopes requested:** `tagmanager.readonly`, `tagmanager.edit.containers`, `tagmanager.edit.containerversions`, and `tagmanager.publish` only if publishing is enabled. Set `gsCode.allowPublish: false` and the publish scope is never requested.
+- **Where pushes go:** into a GTM *workspace*, never the live container. Publishing is a separate command that makes you type the container id.
+- **Where your tokens live:** your OS keychain (VS Code SecretStorage), or `~/.config/gs-code/` with file mode 600 for the CLI.
+- **Who it talks to:** only `googleapis.com`, through your own OAuth client. No server of mine, no analytics, no telemetry. The only runtime dependency is Google's `google-auth-library`.
+- **Try it safely first:** set `allowPublish` to `false`, sign in, and open a new workspace on a test container. Pull and look around before you push anything.
+
 ## What it does
 
 | | |
@@ -38,7 +50,11 @@ Container export / import helps a little, but the export is one giant JSON file 
 
 ## Getting started
 
-### 1. Create a Google OAuth client (one time, ~2 minutes)
+### 1. Install
+
+GS Code is not on the VS Code Marketplace yet. Download `gs-code-0.1.0.vsix` from [Releases](https://github.com/Matthew-Klette/gs-code/releases), then in VS Code run **Extensions: Install from VSIX…** and pick the file. (Or build it yourself, see [Development](#development).)
+
+### 2. Create a Google OAuth client (one time, about 10 minutes)
 
 GS Code talks to the Tag Manager API with **your** Google account through **your own** OAuth client. No server in the middle, nobody else ever sees your tokens.
 
@@ -47,13 +63,17 @@ GS Code talks to the Tag Manager API with **your** Google account through **your
 3. **Google Auth Platform → Branding / Audience**: app name of your choice, audience **External** (or **Internal** on Google Workspace), and add the Google account you use for GTM under **Test users**.
 4. **Google Auth Platform → Clients → Create client** → application type **Desktop app** → **Download JSON**.
 
-### 2. Sign in
+**Can't create a Cloud project?** Any project you already have works, for example the one your server-side GTM runs in: enable the Tag Manager API there and add a Desktop client. On Google Workspace, ask your admin for one **Internal** Desktop client and share it with the team (everyone signs in with their own account; the API quota of 25 requests per 100 seconds is shared per project).
+
+**Why sign-in expires after 7 days:** Google expires refresh tokens weekly for External apps in **Testing** status. GS Code tells you when to sign in again. To stop it, use an **Internal** audience, or set the app's publishing status to **In production** (the unverified-app screen stays, because the app is yours and unreviewed).
+
+### 3. Sign in
 
 Command Palette (`⇧⌘P` / `Ctrl+Shift+P`) → **GS Code: Configure OAuth Client** → pick the downloaded JSON → **Sign In**.
 
 Google shows "Google hasn't verified this app" because the app is yours and in testing mode; choose **Continue**. Credentials are stored in your OS keychain (VS Code SecretStorage).
 
-### 3. Open a workspace
+### 4. Open a workspace
 
 **GS Code: Open Workspace…** → account → container → workspace (or **Create new workspace…**) → a parent folder.
 
