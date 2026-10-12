@@ -16,7 +16,9 @@ import { pushWorkspace } from '../core/ops/push';
 import { refreshMirror, resolveGtmConflict, switchWorkspace } from '../core/ops/sync';
 import { discardChanges, initMirror, resolveConflict, tidyFileNames } from '../core/ops/workspace';
 import { GtmError, WorkspaceGoneError, type WorkspaceInfo } from '../core/types';
-import { FileCredentialStore, fileStampStore, loadCliConfig } from './fileStore';
+import { configDir, FileCredentialStore, fileStampStore, loadCliConfig } from './fileStore';
+import { Toolkit } from '../debugger/toolkit';
+import { serveMcp } from './mcp';
 import { RateLimiter } from '../core/rateLimiter';
 
 const HELP = `gscode: edit a Google Tag Manager workspace as files
@@ -45,6 +47,12 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode publish [dir] --version <id> --confirm <GTM-XXXX> [--rollback]
                                      publish an existing version (--rollback: an older one, on purpose)
   gscode versions [dir]              list container versions (* = live)
+  gscode debug <url> [--dir dir] [--live]
+                                     record a page in the debug browser: events, tags, consent, hits
+                                     (default: your unpublished workspace; --live: the published container)
+  gscode explain <seq> [tag] [--dir dir]
+                                     why tags fired or not on a recorded event (latest session)
+  gscode mcp [--dir dir]             MCP server for AI agents: claude mcp add gscode -- gscode mcp
   gscode environments [dir]          list environments (live, latest, workspace previews, your own)
 
 Protected containers (version/publish blocked): ~/.config/gs-code/config.json
@@ -56,6 +64,8 @@ CI and servers (no browser):
                          \`gcloud auth application-default login\`. Add the service account's
                          email as a user in GTM. Publishing needs GSCODE_ALLOW_PUBLISH=1.
   GSCODE_ACCESS_TOKEN    use this access token as is
+Debug browser: GSCODE_BROWSER_URL=http://127.0.0.1:9222 attaches to a running Chromium browser;
+  GSCODE_BROWSER_PATH picks the executable; GSCODE_SGTM_HOSTS=sgtm.example.com marks server containers.
 Config dir: GSCODE_CONFIG_DIR, else $XDG_CONFIG_HOME/gs-code, else ~/.config/gs-code`;
 
 const out = (line = ''): void => {
@@ -288,6 +298,52 @@ async function cmdEnvironments(root: string) {
   }
 }
 
+function toolkit(defaultRoot: string): Toolkit {
+  return new Toolkit({
+    api,
+    defaultRoot: () => defaultRoot,
+    browser: () => ({
+      browserUrl: process.env.GSCODE_BROWSER_URL,
+      executablePath: process.env.GSCODE_BROWSER_PATH,
+      profileDir: path.join(configDir(), 'browser-profile'),
+    }),
+    settings: () => ({ sgtmHosts: process.env.GSCODE_SGTM_HOSTS?.split(',').map((host) => host.trim()).filter(Boolean) }),
+  });
+}
+
+async function cmdDebug(url: string | undefined, values: { dir?: string; live?: boolean }) {
+  if (!url) throw new GtmError('Usage: gscode debug <url> [--dir dir] [--live]');
+  const root = path.resolve(values.dir ?? '.');
+  const kit = toolkit(root);
+  out(await kit.run('debug_start', { url, mode: values.live ? 'live' : 'workspace' }));
+  const session = kit.activeSession;
+  if (!session) return;
+  let shown = 0;
+  const show = () => {
+    const events = session.timeline.events;
+    for (const event of events.slice(shown)) {
+      const tags = event.tags.length ? `  tags: ${event.tags.map((tag) => `${tag.name ?? tag.id}=${tag.status}`).join(', ')}` : '';
+      out(`#${event.seq} ${event.event ?? '(message)'}${tags}`);
+    }
+    shown = events.length;
+  };
+  session.on('record', () => setTimeout(show, 300));
+  out('Recording. Enter = reload, e <seq> = explain, q = quit.');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  await new Promise<void>((resolve) => {
+    rl.on('line', (line) => {
+      const [command, arg] = line.trim().split(/\s+/);
+      if (command === 'q') return void session.stop().then(resolve);
+      if (command === 'e' && arg) return void kit.run('debug_explain', { seq: Number(arg) }).then(out, (error: unknown) => out(String(error)));
+      void session.reload();
+    });
+    session.once('stopped', () => resolve());
+    process.once('SIGINT', () => void session.stop().then(resolve));
+  });
+  rl.close();
+  out(`Session saved to ${session.file ?? '(not saved)'}.`);
+}
+
 async function cmdPublish(root: string, values: { version?: string; confirm?: string; rollback?: boolean }) {
   if (!values.version) throw new GtmError('--version <id> is required.');
   const state = await readState(root);
@@ -310,7 +366,7 @@ async function main(argv: string[]): Promise<void> {
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
       interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
-      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' }, rollback: { type: 'boolean' },
+      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' }, rollback: { type: 'boolean' }, live: { type: 'boolean' },
     },
   });
   const [command, ...rest] = positionals;
@@ -358,6 +414,13 @@ async function main(argv: string[]): Promise<void> {
     case 'version': return cmdVersion(root, values);
     case 'publish': return cmdPublish(root, values);
     case 'versions': return cmdVersions(root);
+    case 'debug': return cmdDebug(rest[0], values);
+    case 'explain': {
+      const dir = path.resolve(values.dir ?? '.');
+      if (!rest[0]) throw new GtmError('Usage: gscode explain <seq> [tag] [--dir dir]');
+      return out(await toolkit(dir).run('debug_explain', { seq: Number(rest[0]), ...(rest[1] ? { tag: rest.slice(1).join(' ') } : {}) }));
+    }
+    case 'mcp': return serveMcp(toolkit(path.resolve(values.dir ?? '.')));
     case 'environments': return cmdEnvironments(root);
     case 'switch': return cmdSwitch(root, { workspace: values.workspace, new: values.new });
     default: return out(HELP);
