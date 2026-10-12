@@ -55,4 +55,5 @@ jobs:
 
       - name: Extension integration test
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm run test:extension
+        # One retry: the VS Code window sometimes hangs at startup under xvfb before any test runs.
+        run: xvfb-run -a npm run test:extension || xvfb-run -a npm run test:extension

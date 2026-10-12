@@ -16,7 +16,7 @@ async function main(): Promise<void> {
     vscodeExecutablePath: VSCODE,
     extensionDevelopmentPath: path.resolve(__dirname, '../..'),
     extensionTestsPath: path.resolve(__dirname, 'suite.js'),
-    launchArgs: [mirror, '--user-data-dir', path.join(profile, 'data'), '--extensions-dir', path.join(profile, 'ext'), '--disable-workspace-trust', '--skip-welcome'],
+    launchArgs: [mirror, '--user-data-dir', path.join(profile, 'data'), '--extensions-dir', path.join(profile, 'ext'), '--disable-workspace-trust', '--skip-welcome', '--disable-gpu'],
     extensionTestsEnv: { GSCODE_MIRROR: mirror },
   });
 }
