@@ -6,7 +6,7 @@ import { countChanges, type EntityChange } from '../core/mirror/diff';
 import { BASE_DIR, BUILTINS_FILE, FOLDERS_FILE, MERGE_DIR, REMOTE_DIR, STATE_DIR } from '../core/mirror/layout';
 import type { Overlay } from '../core/mirror/model';
 import { readState, type GtmConflict, type MirrorState } from '../core/mirror/state';
-import { AutoPull } from '../core/ops/autoPull';
+import { AutoPull, clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/autoPull';
 import { workingStatus, type WorkingStatus } from '../core/ops/plan';
 import type { RefreshResult } from '../core/ops/sync';
 import { renderFiles } from '../core/serialize/entityFiles';
@@ -26,6 +26,14 @@ export interface MirrorDeps {
   readonly diagnostics: vscode.DiagnosticCollection;
   readonly autoPull: AutoPullSettings;
   readonly onDidChange: () => void;
+}
+
+export function autoPullConfig(): AutoPullSettings {
+  const section = vscode.workspace.getConfiguration('gsCode.autoPull');
+  return {
+    enabled: section.get<boolean>('enabled', true),
+    intervalMs: clampInterval(section.get<number>('intervalSeconds', DEFAULT_INTERVAL_SECONDS)),
+  };
 }
 
 /** Unsaved editors under `root`, keyed by mirror-relative path. They count as local edits. */

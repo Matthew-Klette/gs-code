@@ -4,9 +4,10 @@ import { HttpGtmApi } from '../core/api';
 import { GoogleTokenProvider } from '../core/auth/oauth';
 import { STATE_FILE } from '../core/mirror/layout';
 import { hasState } from '../core/mirror/state';
-import { clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/autoPull';
 import { registerCommands } from './commands';
-import { GtmDecorations, MirrorController, type AutoPullSettings } from './mirror';
+import { fileStampStore } from '../cli/fileStore';
+import { RateLimiter } from '../core/rateLimiter';
+import { autoPullConfig, GtmDecorations, MirrorController } from './mirror';
 import { SecretCredentialStore } from './secretStore';
 
 /** Returned from activate() so integration tests can inspect state. */
@@ -18,14 +19,6 @@ export interface GsCodeExtensionApi {
 const FOCUS_RECHECK_MS = 10_000;
 /** How often the "synced X ago" text is redrawn. */
 const STATUS_TICK_MS = 15_000;
-
-function autoPullSettings(): AutoPullSettings {
-  const section = vscode.workspace.getConfiguration('gsCode.autoPull');
-  return {
-    enabled: section.get<boolean>('enabled', true),
-    intervalMs: clampInterval(section.get<number>('intervalSeconds', DEFAULT_INTERVAL_SECONDS)),
-  };
-}
 
 export function formatAgo(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -46,6 +39,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
   const store = new SecretCredentialStore(context.secrets);
   const tokens = new GoogleTokenProvider(store);
   const api = new HttpGtmApi(tokens, {
+    // Same request history file as the gscode CLI, so both together stay inside the 25 requests / 100 s quota.
+    limiter: new RateLimiter(undefined, undefined, undefined, (ms) => output.appendLine(`Waiting ${Math.ceil(ms / 1000)}s for the GTM API quota…`), fileStampStore()),
     onRetry: (attempt, delayMs, reason) => output.appendLine(`retry ${attempt} in ${Math.round(delayMs / 1000)}s: ${reason}`),
   });
   const diagnostics = vscode.languages.createDiagnosticCollection('gtm');
@@ -77,7 +72,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
   const addMirror = async (root: string) => {
     if (controllers.has(root) || !(await hasState(root))) return;
     try {
-      const controller = await MirrorController.create(root, { api, output, diagnostics, autoPull: autoPullSettings(), onDidChange: updateStatusBar });
+      const controller = await MirrorController.create(root, { api, output, diagnostics, autoPull: autoPullConfig(), onDidChange: updateStatusBar });
       controllers.set(root, controller);
       await controller.refresh();
     } catch (error: unknown) {
@@ -116,7 +111,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (!event.affectsConfiguration('gsCode.autoPull')) return;
-      const settings = autoPullSettings();
+      const settings = autoPullConfig();
       controllers.forEach((controller) => controller.applySettings(settings));
       updateStatusBar();
     }),

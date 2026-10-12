@@ -28,4 +28,6 @@ if (watch) {
 if (process.argv.includes('--tests')) {
   await esbuild.build({ ...shared, entryPoints: ['test/extension/runTest.ts'], outfile: 'dist/test/runTest.js', external: ['vscode', '@vscode/test-electron'] });
   await esbuild.build({ ...shared, entryPoints: ['test/extension/suite.ts'], outfile: 'dist/test/suite.js', external: ['vscode'] });
+  await esbuild.build({ ...shared, entryPoints: ['test/extension/runLive.ts'], outfile: 'dist/test/runLive.js', external: ['vscode', '@vscode/test-electron'] });
+  await esbuild.build({ ...shared, entryPoints: ['test/extension/liveSuite.ts'], outfile: 'dist/test/liveSuite.js', external: ['vscode'] });
 }

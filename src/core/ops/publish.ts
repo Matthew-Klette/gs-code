@@ -4,6 +4,7 @@ import { writeState, type MirrorState } from '../mirror/state';
 import { GtmError, parseWorkspacePath } from '../types';
 import { workingStatus } from './plan';
 import { applySnapshot } from './pull';
+import { followWorkspace } from './sync';
 
 export class ProtectedContainerError extends GtmError {
   constructor(publicId: string) {
@@ -36,9 +37,9 @@ export interface VersionResult {
 }
 
 /**
- * Turns the workspace into a container version (GTM then deletes the workspace
- * and starts a fresh one), optionally publishes it, and re-points the mirror at
- * the new workspace.
+ * Turns the workspace into a container version and optionally publishes it. GTM deletes the
+ * workspace; it only creates a replacement when that was the last one, so the mirror moves to
+ * GTM's replacement or to a workspace with the same name (reused or created).
  */
 export async function createVersion(root: string, api: GtmApi, state: MirrorState, request: VersionRequest): Promise<VersionResult> {
   const progress = request.onProgress ?? (() => undefined);
@@ -59,26 +60,40 @@ export async function createVersion(root: string, api: GtmApi, state: MirrorStat
   if (!version.containerVersionId) throw new GtmError('GTM did not return a container version id.');
 
   const versionId = version.containerVersionId;
+  // Publish first: it does not depend on any workspace, so a failed re-point never leaves the version unpublished.
+  const publishError = request.publish ? await publishOrError(api, state, versionId, progress) : undefined;
+  const publishedNote = request.publish && !publishError ? ' and published' : '';
+
   let nextState: MirrorState;
   try {
     nextState = await repointWorkspace(root, api, state, version.newWorkspacePath, versionId);
   } catch (error: unknown) {
     throw new GtmError(
-      `Version ${versionId} was created and GTM replaced the workspace, but switching this folder to the new workspace failed: ${message(error)}. ` +
-        'Open a fresh mirror of the new workspace ("Open Workspace…").',
+      `Version ${versionId} was created${publishedNote}, but switching this folder to a new workspace failed: ${message(error)}. ` +
+        `${publishError ? `Publishing also failed: ${publishError}. ` : ''}Open a fresh mirror ("Open Workspace…").`,
     );
   }
-  if (!request.publish) return { versionId, published: false, state: nextState };
-
-  progress(`Publishing version ${versionId}…`);
-  let published: { compilerError: boolean };
-  try {
-    published = await api.publishVersion(state.container.accountId, state.container.containerId, versionId);
-  } catch (error: unknown) {
-    throw new GtmError(`Version ${versionId} was created but NOT published: ${message(error)}. Publish it from Tag Manager → Versions, or sign in with allowPublish enabled.`);
+  if (publishError) {
+    throw new GtmError(`Version ${versionId} was created but NOT published: ${publishError}. This folder now follows workspace "${nextState.workspace.name}". Publish it with \`gscode publish --version ${versionId}\` or from Tag Manager → Versions.`);
   }
-  if (published.compilerError) throw new GtmError(`Version ${versionId} was created but publishing hit a compiler error.`);
-  return { versionId, published: true, state: nextState };
+  return { versionId, published: request.publish, state: nextState };
+}
+
+/** Publish an existing container version (e.g. one whose publish failed), with the same guards. */
+export async function publishVersion(api: GtmApi, state: MirrorState, versionId: string, protectedContainers: readonly string[]): Promise<void> {
+  assertNotProtected(state, protectedContainers);
+  const error = await publishOrError(api, state, versionId, () => undefined);
+  if (error) throw new GtmError(`Version ${versionId} was NOT published: ${error}`);
+}
+
+async function publishOrError(api: GtmApi, state: MirrorState, versionId: string, progress: (message: string) => void): Promise<string | undefined> {
+  progress(`Publishing version ${versionId}…`);
+  try {
+    const published = await api.publishVersion(state.container.accountId, state.container.containerId, versionId);
+    return published.compilerError ? 'GTM reported a compiler error' : undefined;
+  } catch (error: unknown) {
+    return `${message(error)} (sign in with allowPublish enabled if the token lacks the publish scope)`;
+  }
 }
 
 function message(error: unknown): string {
@@ -86,8 +101,8 @@ function message(error: unknown): string {
 }
 
 async function repointWorkspace(root: string, api: GtmApi, state: MirrorState, newWorkspacePath: string | undefined, versionId: string): Promise<MirrorState> {
-  if (!newWorkspacePath) throw new GtmError('GTM did not say which workspace replaced the old one.');
-  const workspace = await api.getWorkspace(parseWorkspacePath(newWorkspacePath));
+  // GTM only creates a replacement when the versioned workspace was the last one (verified live 2026-10-12).
+  const workspace = newWorkspacePath ? await api.getWorkspace(parseWorkspacePath(newWorkspacePath)) : await followWorkspace(api, state);
   // The new workspace starts from the version just created; its status is unknown, so the next check pulls.
   const moved: MirrorState = { ...state, workspace, remote: { versionId }, gtmConflicts: [] };
   await writeState(root, moved);

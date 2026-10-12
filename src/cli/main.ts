@@ -9,7 +9,7 @@ import { describeChanges, describeConflicts, describeIssues, describePull, descr
 import { countChanges, isEmpty } from '../core/mirror/diff';
 import { readState } from '../core/mirror/state';
 import { workingStatus } from '../core/ops/plan';
-import { assertNotProtected, createVersion } from '../core/ops/publish';
+import { assertNotProtected, createVersion, publishVersion } from '../core/ops/publish';
 import { AutoPull, clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/autoPull';
 import { pushWorkspace } from '../core/ops/push';
 import { refreshMirror, resolveGtmConflict } from '../core/ops/sync';
@@ -35,6 +35,7 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode resolve <base> (--mine | --theirs) [--dir dir]
   gscode resolve-gtm <base> (--keep-workspace | --latest) [--dir dir]
   gscode version [dir] --name <name> [--notes <text>] [--publish --confirm <GTM-XXXX>]
+  gscode publish [dir] --version <id> --confirm <GTM-XXXX>     publish an existing version
 
 Protected containers (version/publish blocked): ~/.config/gs-code/config.json
 {"protectedContainers": ["GTM-XXXXXXX"]} or GSCODE_PROTECTED=GTM-A,GTM-B`;
@@ -189,6 +190,18 @@ async function cmdVersion(root: string, values: { name?: string; notes?: string;
   out(`Version ${result.versionId} created${result.published ? ' and published' : ''}. Now on workspace "${result.state.workspace.name}".`);
 }
 
+async function cmdPublish(root: string, values: { version?: string; confirm?: string }) {
+  if (!values.version) throw new GtmError('--version <id> is required.');
+  const state = await readState(root);
+  const protectedContainers = (await loadCliConfig()).protectedContainers ?? [];
+  assertNotProtected(state, protectedContainers);
+  if (values.confirm?.toUpperCase() !== state.container.publicId.toUpperCase()) {
+    throw new GtmError(`Publishing goes live. Repeat the container id: --confirm ${state.container.publicId}`);
+  }
+  await publishVersion(api, state, values.version, protectedContainers);
+  out(`Version ${values.version} published on ${state.container.publicId}.`);
+}
+
 async function main(argv: string[]): Promise<void> {
   const { values, positionals } = parseArgs({
     args: argv,
@@ -198,7 +211,7 @@ async function main(argv: string[]): Promise<void> {
       workspace: { type: 'string' }, create: { type: 'boolean' }, sequential: { type: 'boolean' }, yes: { type: 'boolean', short: 'y' },
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
-      interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' },
+      interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
     },
   });
   const [command, ...rest] = positionals;
@@ -234,6 +247,7 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case 'version': return cmdVersion(root, values);
+    case 'publish': return cmdPublish(root, values);
     default: return out(HELP);
   }
 }

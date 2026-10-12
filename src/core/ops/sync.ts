@@ -97,7 +97,7 @@ export async function refreshMirror(root: string, api: GtmApi, initial: MirrorSt
  * Reuse a workspace with the same name, or create one: it starts from the latest version,
  * and entity ids are container-wide, so the three-way merge carries on as before.
  */
-async function followWorkspace(api: GtmApi, state: MirrorState): Promise<WorkspaceInfo> {
+export async function followWorkspace(api: GtmApi, state: MirrorState): Promise<WorkspaceInfo> {
   const { accountId, containerId } = state.container;
   const existing = (await api.listWorkspaces(accountId, containerId)).find((workspace) => workspace.name === state.workspace.name);
   if (existing) return existing;

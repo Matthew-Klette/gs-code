@@ -52,6 +52,10 @@ export class FakeGtm implements GtmApi {
   baseContents: Contents = emptyContents();
   baseVersionId?: string;
   mergeConflicts: ApiMergeConflict[] = [];
+  /** Real GTM only creates a replacement workspace when the versioned one was the last; set false to mimic other workspaces existing. */
+  replaceWorkspaceOnVersion = true;
+  /** The mirrored workspace was deleted and nothing replaced it. */
+  private workspaceGone = false;
   private nextId = 1000;
   private clock = 1;
 
@@ -113,11 +117,12 @@ export class FakeGtm implements GtmApi {
 
   async listWorkspaces(): Promise<WorkspaceInfo[]> {
     this.calls.push('listWorkspaces');
-    return [this.workspace];
+    return this.workspaceGone ? [] : [this.workspace];
   }
 
   async createWorkspace(_a: string, _c: string, name: string): Promise<WorkspaceInfo> {
     this.calls.push(`createWorkspace ${name}`);
+    this.workspaceGone = false;
     this.workspace = { ...this.workspace, workspaceId: String(this.nextId++), name };
     return this.workspace;
   }
@@ -302,6 +307,10 @@ export class FakeGtm implements GtmApi {
     this.baseContents = structuredClone(this.entities);
     this.baseVersionId = id;
     this.workspace = { ...this.workspace, workspaceId: String(this.nextId++), name: 'Default Workspace' };
+    if (!this.replaceWorkspaceOnVersion) {
+      this.workspaceGone = true;
+      return { containerVersionId: id, compilerError: false };
+    }
     this.entities = Object.fromEntries(
       KIND_ORDER.map((kind) => [kind, this.entities[kind].map((entity) => this.stamp(kind, entity))]),
     ) as unknown as Record<EntityKind, ApiEntity[]>;
@@ -341,6 +350,7 @@ export class FakeGtm implements GtmApi {
   }
 
   private assertWorkspace(ref: WorkspaceRef): void {
+    if (this.workspaceGone) throw new GtmError(`workspace ${ref.workspaceId} not found`, 404);
     if (ref.workspaceId !== this.workspace.workspaceId) throw new GtmError(`workspace ${ref.workspaceId} not found`, 404);
   }
 }

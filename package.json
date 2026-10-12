@@ -46,6 +46,11 @@
         "category": "GS Code"
       },
       {
+        "command": "gsCode.importCliSignIn",
+        "title": "Import Sign-In from gscode CLI",
+        "category": "GS Code"
+      },
+      {
         "command": "gsCode.signOut",
         "title": "Sign Out",
         "category": "GS Code"
@@ -253,7 +258,8 @@
     "test:coverage": "vitest run --coverage",
     "package": "npm run build && vsce package --no-dependencies",
     "test:extension": "node esbuild.mjs --tests && node dist/test/runTest.js",
-    "check:safety": "node scripts/check-publish-safety.mjs"
+    "check:safety": "node scripts/check-publish-safety.mjs",
+    "test:live": "node esbuild.mjs --tests && node dist/test/runLive.js"
   },
   "dependencies": {
     "google-auth-library": "^10.9.1"

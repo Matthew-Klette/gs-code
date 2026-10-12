@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isEmpty } from '../src/core/mirror/diff';
 import { readState, type MirrorState } from '../src/core/mirror/state';
 import { workingStatus } from '../src/core/ops/plan';
-import { createVersion, ProtectedContainerError } from '../src/core/ops/publish';
+import { createVersion, ProtectedContainerError, publishVersion } from '../src/core/ops/publish';
 import { pullWorkspace } from '../src/core/ops/pull';
 import { PushBlockedError, pushWorkspace, type PushStrategy } from '../src/core/ops/push';
 import { discardChanges, initMirror, resolveConflict } from '../src/core/ops/workspace';
@@ -284,5 +284,36 @@ describe('versions', () => {
     await writeJson('tags/GA4 - purchase.json', { ...tag, notes: 'after version' });
     await push();
     expect(gtm.find('tag', 'GA4 - purchase')?.notes).toBe('after version');
+  });
+
+  it('publishes, then recreates the workspace by name when GTM does not replace it (other workspaces exist)', async () => {
+    gtm.replaceWorkspaceOnVersion = false;
+    const named = (await state()).workspace.name;
+    const result = await createVersion(root, gtm, await state(), { name: 'v1', notes: '', publish: true, protectedContainers: [] });
+    expect(result).toMatchObject({ versionId: '1', published: true });
+    expect(gtm.versions[0]?.published).toBe(true);
+    expect(gtm.calls).toContain(`createWorkspace ${named}`);
+    expect((await state()).workspace.workspaceId).toBe(gtm.workspace.workspaceId);
+    await expectClean();
+  });
+
+  it('still publishes when re-pointing the folder fails', async () => {
+    gtm.replaceWorkspaceOnVersion = false;
+    gtm.createWorkspace = async () => {
+      throw new Error('workspace limit reached');
+    };
+    await expect(createVersion(root, gtm, await state(), { name: 'v1', notes: '', publish: true, protectedContainers: [] })).rejects.toThrow(
+      /Version 1 was created and published, but switching this folder .*workspace limit reached/,
+    );
+    expect(gtm.versions[0]?.published).toBe(true);
+  });
+
+  it('publishes an existing version, but never on a protected container', async () => {
+    gtm.calls = [];
+    await expect(publishVersion(gtm, await state(), '1', ['GTM-TEST123'])).rejects.toBeInstanceOf(ProtectedContainerError);
+    expect(gtm.calls).toEqual([]);
+    await createVersion(root, gtm, await state(), { name: 'v1', notes: '', publish: false, protectedContainers: [] });
+    await publishVersion(gtm, await state(), '1', []);
+    expect(gtm.versions[0]?.published).toBe(true);
   });
 });

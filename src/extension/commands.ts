@@ -12,7 +12,8 @@ import { pushWorkspace, type PushStrategy } from '../core/ops/push';
 import { refreshMirror, resolveGtmConflict, type GtmResolution, type RefreshResult } from '../core/ops/sync';
 import { discardChanges, initMirror, resolveConflict } from '../core/ops/workspace';
 import type { ContainerInfo, WorkspaceInfo } from '../core/types';
-import { dirtyOverlay, type MirrorController, type ResourceState } from './mirror';
+import { FileCredentialStore } from '../cli/fileStore';
+import { autoPullConfig, dirtyOverlay, type MirrorController, type ResourceState } from './mirror';
 
 const MAX_PREVIEW_LINES = 20;
 
@@ -84,6 +85,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
       deps.resetAuth();
       void vscode.window.showInformationMessage('Signed out of Google Tag Manager.');
     }),
+    register('importCliSignIn', () => importCliSignIn(deps)),
     register('open', () => openWorkspace(deps)),
     register('refresh', async (arg) => (await pickController(deps, arg))?.refresh()),
     register('pull', (arg) => pull(deps, arg)),
@@ -116,6 +118,23 @@ async function configureClient(deps: CommandDeps): Promise<void> {
   }
 }
 
+/** Reuse the `gscode login` client and tokens (~/.config/gs-code) instead of signing in again. */
+async function importCliSignIn(deps: CommandDeps): Promise<boolean> {
+  const cli = new FileCredentialStore();
+  const [client, tokens] = await Promise.all([cli.loadClient(), cli.loadTokens()]);
+  if (!client || !tokens?.refresh_token) {
+    void vscode.window.showWarningMessage('No gscode CLI sign-in found. Run `gscode login` first, or use "GS Code: Sign In".');
+    return false;
+  }
+  await deps.store.saveClient(client);
+  await deps.store.saveTokens(tokens);
+  deps.resetAuth();
+  deps.output.appendLine('Imported the gscode CLI sign-in into the keychain.');
+  for (const controller of deps.controllers()) controller.applySettings(autoPullConfig());
+  void vscode.window.showInformationMessage('Signed in with the gscode CLI credentials.');
+  return true;
+}
+
 async function doSignIn(deps: CommandDeps): Promise<boolean> {
   if (!(await deps.store.loadClient())) {
     const choice = await vscode.window.showWarningMessage('Configure your OAuth client first (a Desktop app client from Google Cloud Console).', 'Configure', 'How?');
@@ -128,6 +147,8 @@ async function doSignIn(deps: CommandDeps): Promise<boolean> {
     deps.resetAuth();
     return true;
   });
+  // Auto-pull stops on sign-in errors; start it again now that there is a token.
+  if (done) for (const controller of deps.controllers()) controller.applySettings(autoPullConfig());
   if (done) void vscode.window.showInformationMessage('Signed in to Google Tag Manager.');
   return done === true;
 }
