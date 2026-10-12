@@ -11,17 +11,35 @@ export const MERGE_DIR = `${STATE_DIR}/merge`;
 export const FOLDERS_FILE = 'folders.json';
 export const BUILTINS_FILE = 'built-in-variables.json';
 
-const MAX_NAME_LENGTH = 120;
+/** UTF-8 bytes, leaving room for " (id) 2", the extension and sidecar suffixes under the 255-byte limit. */
+const MAX_NAME_BYTES = 120;
+/** Windows refuses these as file names, with any extension, in any case. */
+const RESERVED = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
 
-/** Turn a GTM display name into a portable file name. */
+/** Turn a GTM display name into a file name that works on macOS, Windows and Linux. */
 export function safeFileName(name: string): string {
   const cleaned = name
+    .normalize('NFC') // macOS and git otherwise disagree on accented names
     .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/[. ]+$/, '');
-  const clipped = cleaned.slice(0, MAX_NAME_LENGTH).trim();
-  return clipped || '_';
+  const clipped = clipBytes(cleaned, MAX_NAME_BYTES).trim().replace(/[. ]+$/, '');
+  const safe = clipped || '_';
+  return RESERVED.test(safe) ? `_${safe}` : safe;
+}
+
+/** Cut to at most `max` UTF-8 bytes without splitting a character (or an emoji's surrogate pair). */
+function clipBytes(text: string, max: number): string {
+  let bytes = 0;
+  let result = '';
+  for (const char of text) {
+    const size = Buffer.byteLength(char, 'utf8');
+    if (bytes + size > max) break;
+    bytes += size;
+    result += char;
+  }
+  return result;
 }
 
 /**

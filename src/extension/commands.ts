@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { GtmApi } from '../core/api';
-import { parseClientSecretJson, signIn, type CredentialStore } from '../core/auth/oauth';
+import { emailFromTokens, parseClientSecretJson, signIn, signOut, type CredentialStore } from '../core/auth/oauth';
 import { describeChanges, describeConflicts, describePull } from '../core/format';
 import { changeSignature, countChanges, isEmpty } from '../core/mirror/diff';
 import { safeFileName } from '../core/mirror/layout';
@@ -83,9 +83,17 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
     register('configureClient', () => configureClient(deps)),
     register('signIn', () => doSignIn(deps)),
     register('signOut', async () => {
-      await deps.store.clearTokens();
+      await signOut(deps.store);
       deps.resetAuth();
-      void vscode.window.showInformationMessage('Signed out of Google Tag Manager.');
+      void vscode.window.showInformationMessage('Signed out of Google Tag Manager (access revoked at Google).');
+    }),
+    register('removeClient', async () => {
+      const ok = await vscode.window.showWarningMessage('Sign out and remove the OAuth client from the keychain?', { modal: true }, 'Remove');
+      if (ok !== 'Remove') return;
+      await signOut(deps.store);
+      await deps.store.clearClient();
+      deps.resetAuth();
+      void vscode.window.showInformationMessage('Signed out and removed the OAuth client.');
     }),
     register('importCliSignIn', () => importCliSignIn(deps)),
     register('open', () => openWorkspace(deps)),
@@ -145,14 +153,43 @@ async function doSignIn(deps: CommandDeps): Promise<boolean> {
     if (choice === 'How?') await vscode.env.openExternal(vscode.Uri.parse('https://github.com/Matthew-Klette/gs-code#getting-started'));
     return false;
   }
+  // Remote windows (SSH, WSL, containers, Codespaces): the browser may not reach this machine's 127.0.0.1.
+  const remote = vscode.env.remoteName !== undefined;
+  let pasteBox: vscode.InputBox | undefined;
   const done = await run(deps, 'Signing in to Google Tag Manager (finish in your browser)…', async () => {
-    await signIn(deps.store, { allowPublish: config().allowPublish, openBrowser: async (url) => void (await vscode.env.openExternal(vscode.Uri.parse(url))) });
+    try {
+      await signIn(deps.store, {
+        allowPublish: config().allowPublish,
+        openBrowser: async (url) => void (await vscode.env.openExternal(vscode.Uri.parse(url))),
+        externalRedirect: async (local) => (await vscode.env.asExternalUri(vscode.Uri.parse(local))).toString(true),
+        pasteRedirect: remote
+          ? () =>
+              new Promise<string | undefined>((resolve) => {
+                pasteBox = vscode.window.createInputBox();
+                pasteBox.title = 'GS Code sign-in';
+                pasteBox.prompt = 'If the browser ends on a "can\'t connect" page, paste its full address (http://127.0.0.1:…) here.';
+                pasteBox.ignoreFocusOut = true;
+                pasteBox.onDidAccept(() => {
+                  resolve(pasteBox?.value);
+                  pasteBox?.hide();
+                });
+                pasteBox.onDidHide(() => resolve(undefined));
+                pasteBox.show();
+              })
+          : undefined,
+      });
+    } finally {
+      pasteBox?.dispose();
+    }
     deps.resetAuth();
     return true;
   });
   // Auto-pull stops on sign-in errors; start it again now that there is a token.
   if (done) for (const controller of deps.controllers()) controller.applySettings(autoPullConfig());
-  if (done) void vscode.window.showInformationMessage('Signed in to Google Tag Manager.');
+  if (done) {
+    const account = emailFromTokens(await deps.store.loadTokens());
+    void vscode.window.showInformationMessage(`Signed in to Google Tag Manager${account ? ` as ${account}` : ''}.`);
+  }
   return done === true;
 }
 

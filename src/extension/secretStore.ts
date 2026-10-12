@@ -28,6 +28,10 @@ export class SecretCredentialStore implements CredentialStore {
   async clearTokens(): Promise<void> {
     await this.secrets.delete(TOKENS_KEY);
   }
+
+  async clearClient(): Promise<void> {
+    await this.secrets.delete(CLIENT_KEY);
+  }
 }
 
 function parse<T>(text: string | undefined): T | undefined {

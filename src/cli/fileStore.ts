@@ -52,6 +52,10 @@ export class FileCredentialStore implements CredentialStore {
   async clearTokens(): Promise<void> {
     await fs.rm(path.join(this.dir, 'tokens.json'), { force: true });
   }
+
+  async clearClient(): Promise<void> {
+    await fs.rm(path.join(this.dir, 'client.json'), { force: true });
+  }
 }
 
 export async function loadCliConfig(dir = configDir()): Promise<CliConfig> {

@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { HttpGtmApi } from '../core/api';
-import { GoogleTokenProvider, parseClientSecretJson, signIn } from '../core/auth/oauth';
+import { AdcTokenProvider, emailFromTokens, GoogleTokenProvider, parseClientSecretJson, signIn, signOut, StaticTokenProvider } from '../core/auth/oauth';
+import type { TokenProvider } from '../core/api';
 import { describeChanges, describeConflicts, describeIssues, describePull, describeRefresh } from '../core/format';
 import { changeSignature, countChanges, isEmpty } from '../core/mirror/diff';
 import { readState } from '../core/mirror/state';
@@ -20,8 +21,10 @@ import { RateLimiter } from '../core/rateLimiter';
 
 const HELP = `gscode: edit a Google Tag Manager workspace as files
 
-  gscode login [--client client_secret.json] [--no-publish]
-  gscode logout
+  gscode login [--client client_secret.json] [--no-publish] [--manual]
+                                     --manual: for machines your browser cannot reach (SSH, containers)
+  gscode logout [--forget-client]    revokes the sign-in at Google, then forgets it
+  gscode whoami                      which Google account and permissions are in use
   gscode accounts
   gscode containers <accountId>
   gscode workspaces <accountId> <GTM-XXXX|containerId>
@@ -40,24 +43,48 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode publish [dir] --version <id> --confirm <GTM-XXXX>     publish an existing version
 
 Protected containers (version/publish blocked): ~/.config/gs-code/config.json
-{"protectedContainers": ["GTM-XXXXXXX"]} or GSCODE_PROTECTED=GTM-A,GTM-B`;
+{"protectedContainers": ["GTM-XXXXXXX"]} or GSCODE_PROTECTED=GTM-A,GTM-B
+
+CI and servers (no browser):
+  GSCODE_AUTH=adc        Application Default Credentials: a service-account key file in
+                         GOOGLE_APPLICATION_CREDENTIALS, workload identity federation, or
+                         \`gcloud auth application-default login\`. Add the service account's
+                         email as a user in GTM. Publishing needs GSCODE_ALLOW_PUBLISH=1.
+  GSCODE_ACCESS_TOKEN    use this access token as is
+Config dir: GSCODE_CONFIG_DIR, else $XDG_CONFIG_HOME/gs-code, else ~/.config/gs-code`;
 
 const out = (line = ''): void => {
   process.stdout.write(`${line}\n`);
 };
 
 const store = new FileCredentialStore();
-const tokens = new GoogleTokenProvider(store);
-const api = new HttpGtmApi(tokens, {
+const userTokens = new GoogleTokenProvider(store);
+
+/** A browser sign-in by default; ADC or a ready token when the environment asks for it (CI). */
+function tokenProvider(): TokenProvider {
+  if (process.env.GSCODE_ACCESS_TOKEN) return new StaticTokenProvider(process.env.GSCODE_ACCESS_TOKEN);
+  if (process.env.GSCODE_AUTH === 'adc') return new AdcTokenProvider(process.env.GSCODE_ALLOW_PUBLISH === '1');
+  return userTokens;
+}
+
+const api = new HttpGtmApi(tokenProvider(), {
   limiter: new RateLimiter(undefined, undefined, undefined, (ms) => process.stderr.write(`  waiting ${Math.ceil(ms / 1000)}s for the GTM API quota…\n`), fileStampStore()),
   onRetry: (attempt, delayMs, reason) => process.stderr.write(`  retry ${attempt} in ${Math.round(delayMs / 1000)}s (${reason})\n`),
 });
 
 function openBrowser(url: string): void {
   out(`Opening your browser to sign in. If it does not open, visit:\n${url}\n`);
-  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
-  const args = process.platform === 'win32' ? ['/c', 'start', '""', url] : [url];
+  // Windows: rundll32 takes the URL verbatim; `cmd /c start` would cut it at the first '&'.
+  const [command, args] = process.platform === 'darwin' ? ['open', [url]]
+    : process.platform === 'win32' ? ['rundll32', ['url.dll,FileProtocolHandler', url]]
+    : ['xdg-open', [url]];
   spawn(command, args, { stdio: 'ignore', detached: true }).on('error', () => undefined).unref();
+}
+
+/** No browser on this machine (or it cannot be reached): sign in elsewhere and paste the final address. */
+function isRemoteShell(): boolean {
+  return Boolean(process.env.SSH_CONNECTION || process.env.CODESPACES || process.env.REMOTE_CONTAINERS) ||
+    (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY);
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -74,14 +101,41 @@ async function resolveContainer(accountId: string, idOrPublic: string) {
   return match;
 }
 
-async function cmdLogin(values: { client?: string; 'no-publish'?: boolean }) {
+async function cmdLogin(values: { client?: string; 'no-publish'?: boolean; manual?: boolean }) {
   if (values.client) {
     await store.saveClient(parseClientSecretJson(await fs.readFile(values.client, 'utf8')));
     out('OAuth client saved.');
   }
   const config = await loadCliConfig();
-  await signIn(store, { allowPublish: !values['no-publish'] && config.allowPublish !== false, openBrowser });
-  out('Signed in.');
+  const manual = values.manual === true || isRemoteShell();
+  let rl: ReturnType<typeof createInterface> | undefined;
+  try {
+    await signIn(store, {
+      allowPublish: !values['no-publish'] && config.allowPublish !== false,
+      openBrowser: manual ? (url) => out(`Open this address in a browser on any machine and sign in:\n${url}\n`) : openBrowser,
+      pasteRedirect: manual
+        ? async () => {
+            rl = createInterface({ input: process.stdin, output: process.stdout });
+            out('The browser then tries to open http://127.0.0.1:… and may show "can\'t connect". That is expected.');
+            return rl.question('Paste that whole address here: ');
+          }
+        : undefined,
+    });
+  } finally {
+    rl?.close();
+  }
+  const account = emailFromTokens(await store.loadTokens());
+  out(`Signed in${account ? ` as ${account}` : ''}.`);
+}
+
+async function cmdWhoami() {
+  if (process.env.GSCODE_ACCESS_TOKEN) return out('Using GSCODE_ACCESS_TOKEN from the environment.');
+  if (process.env.GSCODE_AUTH === 'adc') return out(`Using Application Default Credentials${process.env.GOOGLE_APPLICATION_CREDENTIALS ? ` (${process.env.GOOGLE_APPLICATION_CREDENTIALS})` : ''}.`);
+  const tokens = await store.loadTokens();
+  if (!tokens?.refresh_token) return out('Not signed in. Run `gscode login`.');
+  const scopes = (tokens.scope ?? '').split(' ');
+  out(`Signed in as ${emailFromTokens(tokens) ?? '(account unknown: signed in before GS Code asked for it)'}`);
+  out(`Publishing: ${scopes.some((scope) => scope.endsWith('tagmanager.publish')) ? 'allowed' : 'not allowed (signed in without the publish scope)'}`);
 }
 
 async function cmdInit(dir: string | undefined, values: { account?: string; container?: string; workspace?: string; create?: boolean }) {
@@ -238,14 +292,19 @@ async function main(argv: string[]): Promise<void> {
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
       interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
-      'no-sync': { type: 'boolean' }, new: { type: 'string' },
+      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' },
     },
   });
   const [command, ...rest] = positionals;
   const root = path.resolve(rest[0] ?? '.');
   switch (command) {
     case 'login': return cmdLogin(values);
-    case 'logout': await store.clearTokens(); return out('Signed out.');
+    case 'logout': {
+      await signOut(store);
+      if (values['forget-client']) await store.clearClient();
+      return out(`Signed out (access revoked at Google)${values['forget-client'] ? ' and the OAuth client removed' : ''}.`);
+    }
+    case 'whoami': return cmdWhoami();
     case 'accounts': return (await api.listAccounts()).forEach((a) => out(`${a.accountId}\t${a.name}`));
     case 'containers': return (await api.listContainers(rest[0] ?? '')).forEach((c) => out(`${c.publicId}\t${c.containerId}\t${c.usageContext.join(',')}\t${c.name}`));
     case 'workspaces': {

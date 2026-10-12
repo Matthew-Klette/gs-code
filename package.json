@@ -4,10 +4,17 @@
   "description": "Edit an entire Google Tag Manager workspace as files in VS Code. Pull, diff, push, version and publish.",
   "version": "0.1.0",
   "publisher": "matthew-klette",
+  "author": {
+    "name": "Matthew Klette"
+  },
   "license": "MIT",
+  "homepage": "https://github.com/Matthew-Klette/gs-code#readme",
   "repository": {
     "type": "git",
     "url": "https://github.com/Matthew-Klette/gs-code.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Matthew-Klette/gs-code/issues"
   },
   "engines": {
     "vscode": "^1.90.0",
@@ -26,10 +33,25 @@
     "tagging"
   ],
   "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1f2328",
+    "theme": "dark"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
   "main": "./dist/extension.js",
   "bin": {
     "gscode": "./dist/cli.js"
   },
+  "files": [
+    "dist/cli.js",
+    "dist/extension.js",
+    "media/icon.png",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "activationEvents": [
     "workspaceContains:**/.gtm/state.json"
   ],
@@ -125,6 +147,11 @@
       {
         "command": "gsCode.switchWorkspace",
         "title": "Switch Workspace…",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.removeClient",
+        "title": "Remove OAuth Client",
         "category": "GS Code"
       }
     ],
@@ -269,10 +296,9 @@
     "package": "npm run build && vsce package --no-dependencies",
     "test:extension": "node esbuild.mjs --tests && node dist/test/runTest.js",
     "check:safety": "node scripts/check-publish-safety.mjs",
-    "test:live": "node esbuild.mjs --tests && node dist/test/runLive.js"
-  },
-  "dependencies": {
-    "google-auth-library": "^10.9.1"
+    "test:live": "node esbuild.mjs --tests && node dist/test/runLive.js",
+    "prepare": "node esbuild.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run check:safety"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
@@ -281,6 +307,7 @@
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",
+    "google-auth-library": "^10.9.1",
     "typescript": "^5.9.3",
     "vitest": "^5.0.4"
   }

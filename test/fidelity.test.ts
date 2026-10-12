@@ -91,3 +91,48 @@ describe('containers and errors', () => {
     expect(explainError('GET', 'x', 500, 'boom')).toBeUndefined();
   });
 });
+
+describe('portable file names', async () => {
+  const { safeFileName } = await import('../src/core/mirror/layout');
+  it('escapes Windows reserved names and forbidden characters', () => {
+    expect(safeFileName('CON')).toBe('_CON');
+    expect(safeFileName('nul.txt')).toBe('_nul.txt');
+    expect(safeFileName('GA4: purchase / refund?')).toBe('GA4_ purchase _ refund_');
+    expect(safeFileName('trailing dots...')).toBe('trailing dots');
+  });
+
+  it('limits by bytes, never splits a character, and normalises to NFC', () => {
+    const cjk = '購'.repeat(100);
+    expect(Buffer.byteLength(safeFileName(cjk), 'utf8')).toBeLessThanOrEqual(120);
+    const emoji = 'a' + '😀'.repeat(60);
+    expect(safeFileName(emoji)).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect(safeFileName('Café')).toBe('Café');
+  });
+});
+
+describe('sign-in helpers', async () => {
+  const { emailFromTokens, isLoopbackAddress } = await import('../src/core/auth/oauth');
+  const { waitForLoopbackCode } = await import('../src/core/auth/loopback');
+  it('only loopback redirects are acceptable to Google for a Desktop client', () => {
+    expect(isLoopbackAddress('http://127.0.0.1:5000')).toBe(true);
+    expect(isLoopbackAddress('http://localhost:5000/')).toBe(true);
+    expect(isLoopbackAddress('https://abc-5000.app.github.dev/')).toBe(false);
+  });
+
+  it('reads the account email from the id token', () => {
+    const payload = Buffer.from(JSON.stringify({ email: 'me@example.com' })).toString('base64url');
+    expect(emailFromTokens({ id_token: `x.${payload}.y` })).toBe('me@example.com');
+    expect(emailFromTokens({})).toBeUndefined();
+  });
+
+  it('finishes from a pasted redirect address, and rejects one from another attempt', async () => {
+    const loop = await waitForLoopbackCode(5000);
+    loop.submitRedirect(`${loop.redirectUri}/?state=${loop.state}&code=abc`);
+    await expect(loop.code).resolves.toBe('abc');
+    loop.close();
+    const other = await waitForLoopbackCode(5000);
+    other.submitRedirect(`${other.redirectUri}/?state=wrong&code=abc`);
+    await expect(other.code).rejects.toThrow(/different sign-in attempt/);
+    other.close();
+  });
+});

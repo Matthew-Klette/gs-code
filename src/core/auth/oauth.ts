@@ -1,9 +1,12 @@
-import { OAuth2Client, type Credentials } from 'google-auth-library';
+import { GoogleAuth, OAuth2Client, type Credentials } from 'google-auth-library';
 import type { TokenProvider } from '../api';
 import { AuthError, GtmError } from '../types';
 import { waitForLoopbackCode } from './loopback';
 
 const BASE_SCOPES = [
+  // openid + email: only to show which Google account is signed in.
+  'openid',
+  'email',
   'https://www.googleapis.com/auth/tagmanager.readonly',
   'https://www.googleapis.com/auth/tagmanager.edit.containers',
   'https://www.googleapis.com/auth/tagmanager.edit.containerversions',
@@ -26,6 +29,7 @@ export interface CredentialStore {
   loadTokens(): Promise<Credentials | undefined>;
   saveTokens(tokens: Credentials): Promise<void>;
   clearTokens(): Promise<void>;
+  clearClient(): Promise<void>;
 }
 
 /** Accepts the `client_secret_*.json` file Google Cloud Console downloads for a Desktop app client. */
@@ -49,6 +53,38 @@ export interface SignInOptions {
   readonly allowPublish: boolean;
   readonly openBrowser: (url: string) => Promise<void> | void;
   readonly timeoutMs?: number;
+  /**
+   * Map the local redirect address to one the user's browser can reach (VS Code Remote: `asExternalUri`).
+   * Only loopback results are used; Google refuses any other redirect for a Desktop client.
+   */
+  readonly externalRedirect?: (local: string) => Promise<string>;
+  /**
+   * Ask the user for the address the browser ended on, in case the redirect cannot reach this machine.
+   * Runs alongside the loopback listener; whichever finishes first wins. Resolve `undefined` to skip.
+   */
+  readonly pasteRedirect?: () => Promise<string | undefined>;
+}
+
+/** Google only accepts http://127.0.0.1 / http://localhost redirects for Desktop clients. */
+export function isLoopbackAddress(address: string): boolean {
+  try {
+    const url = new URL(address);
+    return url.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** The signed-in account's email, from the id_token Google returns (no extra request). */
+export function emailFromTokens(tokens: Credentials | undefined): string | undefined {
+  const payload = tokens?.id_token?.split('.')[1];
+  if (!payload) return undefined;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { email?: unknown };
+    return typeof claims.email === 'string' ? claims.email : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Desktop OAuth with a loopback redirect and PKCE. Stores the refresh token in `store`. */
@@ -57,23 +93,75 @@ export async function signIn(store: CredentialStore, options: SignInOptions): Pr
   if (!client) throw new GtmError('No OAuth client configured. Run "Configure OAuth Client" first.');
   const loopback = await waitForLoopbackCode(options.timeoutMs);
   try {
-    const oauth = new OAuth2Client({ clientId: client.clientId, clientSecret: client.clientSecret, redirectUri: loopback.redirectUri });
+    const mapped = options.externalRedirect ? await options.externalRedirect(loopback.redirectUri).catch(() => loopback.redirectUri) : loopback.redirectUri;
+    // asExternalUri may return the same port, a forwarded local port, or (Codespaces) an https tunnel Google rejects.
+    const redirectUri = isLoopbackAddress(mapped) ? mapped.replace(/\/$/, '') : loopback.redirectUri;
+    const oauth = new OAuth2Client({ clientId: client.clientId, clientSecret: client.clientSecret, redirectUri });
     const { codeVerifier, codeChallenge } = await oauth.generateCodeVerifierAsync();
     const url = oauth.generateAuthUrl({
       access_type: 'offline',
-      prompt: 'consent',
+      // select_account: lets you pick (or switch) the Google account; consent: always returns a refresh token.
+      prompt: 'select_account consent',
       scope: scopesFor(options.allowPublish),
       state: loopback.state,
       code_challenge: codeChallenge,
       code_challenge_method: 'S256' as never,
     });
     await options.openBrowser(url);
+    if (options.pasteRedirect) {
+      void options.pasteRedirect().then((address) => {
+        if (address) loopback.submitRedirect(address);
+      });
+    }
     const code = await loopback.code;
-    const { tokens } = await oauth.getToken({ code, codeVerifier, redirect_uri: loopback.redirectUri });
+    const { tokens } = await oauth.getToken({ code, codeVerifier, redirect_uri: redirectUri });
     if (!tokens.refresh_token) throw new GtmError('Google did not return a refresh token. Remove the app at myaccount.google.com/permissions and sign in again.');
     await store.saveTokens(tokens);
   } finally {
     loopback.close();
+  }
+}
+
+/** Sign out for real: revoke the refresh token at Google (best effort), then forget it locally. */
+export async function signOut(store: CredentialStore): Promise<void> {
+  const tokens = await store.loadTokens();
+  const client = await store.loadClient();
+  if (tokens?.refresh_token && client) {
+    const oauth = new OAuth2Client({ clientId: client.clientId, clientSecret: client.clientSecret });
+    await oauth.revokeToken(tokens.refresh_token).catch(() => undefined); // already revoked or offline: still sign out
+  }
+  await store.clearTokens();
+}
+
+/**
+ * Application Default Credentials for CI and servers: a service-account key file
+ * (`GOOGLE_APPLICATION_CREDENTIALS`), workload identity federation (e.g. GitHub Actions OIDC) or
+ * `gcloud auth application-default login`. Add the service account's email as a user in GTM.
+ */
+export class AdcTokenProvider implements TokenProvider {
+  private auth?: GoogleAuth;
+
+  constructor(private readonly allowPublish: boolean) {}
+
+  async getAccessToken(): Promise<string> {
+    this.auth ??= new GoogleAuth({ scopes: scopesFor(this.allowPublish).filter((scope) => scope.startsWith('https://')) });
+    try {
+      const token = await this.auth.getAccessToken();
+      if (!token) throw new AuthError('Application Default Credentials returned no access token.');
+      return token;
+    } catch (error: unknown) {
+      if (error instanceof GtmError) throw error;
+      throw new AuthError(`Application Default Credentials failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/** A ready access token from the environment (`GSCODE_ACCESS_TOKEN`), e.g. minted by a CI step. */
+export class StaticTokenProvider implements TokenProvider {
+  constructor(private readonly token: string) {}
+
+  async getAccessToken(): Promise<string> {
+    return this.token;
   }
 }
 
@@ -101,6 +189,10 @@ export class GoogleTokenProvider implements TokenProvider {
 
   async isSignedIn(): Promise<boolean> {
     return (await this.store.loadTokens())?.refresh_token !== undefined;
+  }
+
+  async account(): Promise<string | undefined> {
+    return emailFromTokens(await this.store.loadTokens());
   }
 
   /** Scopes granted at sign-in, for showing whether publish is possible. */

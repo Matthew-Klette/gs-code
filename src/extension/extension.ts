@@ -49,6 +49,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
   statusBar.command = 'workbench.view.scm';
 
+  let account: string | undefined;
+  const refreshAccount = () => void tokens.account().then((email) => {
+    account = email;
+  });
+  refreshAccount();
+
   const updateStatusBar = () => {
     decorations.refresh();
     const list = [...controllers.values()];
@@ -65,7 +71,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
         const auto = controller.autoPull.active ? 'auto-pull on' : 'auto-pull off';
         return `${controller.label}: last synced with GTM ${at ? formatAgo(now - at) : 'never'} (${auto})`;
       })
-      .join('\n');
+      .join('\n') + (account ? `\nSigned in as ${account}` : '');
     statusBar.show();
   };
 
@@ -130,7 +136,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
       store,
       output,
       controllers: () => [...controllers.values()],
-      resetAuth: () => tokens.reset(),
+      resetAuth: () => {
+        tokens.reset();
+        refreshAccount();
+      },
       addMirror,
     }),
     { dispose: () => controllers.forEach((controller) => controller.dispose()) },

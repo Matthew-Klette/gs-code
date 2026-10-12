@@ -14,6 +14,12 @@ export interface Loopback {
   readonly redirectUri: string;
   readonly state: string;
   readonly code: Promise<string>;
+  /**
+   * Finish with the address the browser ended on (`http://127.0.0.1:PORT/?state=…&code=…`). For machines
+   * the browser cannot reach (Codespaces, SSH without port forwarding, headless servers): the browser shows
+   * "can't connect", and the user pastes that address instead.
+   */
+  submitRedirect(address: string): void;
   close(): void;
 }
 
@@ -28,26 +34,33 @@ export async function waitForLoopbackCode(timeoutMs = DEFAULT_TIMEOUT_MS): Promi
   });
   code.catch(() => undefined);
 
+  /** Outcome of one redirect (served or pasted): 'ok', 'stray' (not ours) or 'failed'. */
+  const accept = (params: URLSearchParams): 'ok' | 'stray' | 'failed' => {
+    if (params.get('state') !== state) return 'stray'; // only Google's redirect carries our state
+    const error = params.get('error');
+    const returnedCode = params.get('code');
+    if (error || !returnedCode) {
+      rejectCode(new GtmError(`Sign-in was not completed (${error ?? 'no code'}).`));
+      return 'failed';
+    }
+    resolveCode(returnedCode);
+    return 'ok';
+  };
+
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (url.pathname !== '/') {
       res.writeHead(404).end();
       return;
     }
-    const error = url.searchParams.get('error');
-    const returnedCode = url.searchParams.get('code');
-    if (url.searchParams.get('state') !== state) {
-      // Ignore stray requests; only Google's redirect carries our state.
-      res.writeHead(400, { 'Content-Type': 'text/html' }).end(PAGE('Sign-in failed', 'State mismatch. Start the sign-in again from VS Code.'));
-      return;
-    }
-    if (error || !returnedCode) {
+    const outcome = accept(url.searchParams);
+    if (outcome === 'stray') {
+      res.writeHead(400, { 'Content-Type': 'text/html' }).end(PAGE('Sign-in failed', 'State mismatch. Start the sign-in again.'));
+    } else if (outcome === 'failed') {
       res.writeHead(400, { 'Content-Type': 'text/html' }).end(PAGE('Sign-in cancelled', 'You can close this tab.'));
-      rejectCode(new GtmError(`Sign-in was not completed (${error ?? 'no code'}).`));
-      return;
+    } else {
+      res.writeHead(200, { 'Content-Type': 'text/html' }).end(PAGE('Signed in to Google Tag Manager', 'You can close this tab and return to your editor or terminal.'));
     }
-    res.writeHead(200, { 'Content-Type': 'text/html' }).end(PAGE('Signed in to Google Tag Manager', 'You can close this tab and return to VS Code.'));
-    resolveCode(returnedCode);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -61,6 +74,16 @@ export async function waitForLoopbackCode(timeoutMs = DEFAULT_TIMEOUT_MS): Promi
     redirectUri: `http://127.0.0.1:${port}`,
     state,
     code,
+    submitRedirect: (address: string) => {
+      let params: URLSearchParams;
+      try {
+        params = new URL(address.trim()).searchParams;
+      } catch {
+        rejectCode(new GtmError('That is not the address from the browser. Copy the whole address bar (it starts with http://127.0.0.1).'));
+        return;
+      }
+      if (accept(params) === 'stray') rejectCode(new GtmError('That address belongs to a different sign-in attempt. Start again.'));
+    },
     close: () => {
       clearTimeout(timer);
       server.close();
