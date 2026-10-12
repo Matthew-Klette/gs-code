@@ -14,7 +14,7 @@ import { assertNotProtected, createVersion, publishVersion } from '../core/ops/p
 import { AutoPull, clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/autoPull';
 import { pushWorkspace } from '../core/ops/push';
 import { refreshMirror, resolveGtmConflict, switchWorkspace } from '../core/ops/sync';
-import { discardChanges, initMirror, resolveConflict } from '../core/ops/workspace';
+import { discardChanges, initMirror, resolveConflict, tidyFileNames } from '../core/ops/workspace';
 import { GtmError, WorkspaceGoneError, type WorkspaceInfo } from '../core/types';
 import { FileCredentialStore, fileStampStore, loadCliConfig } from './fileStore';
 import { RateLimiter } from '../core/rateLimiter';
@@ -28,7 +28,9 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode accounts
   gscode containers <accountId>
   gscode workspaces <accountId> <GTM-XXXX|containerId>
-  gscode init <dir> --account <id> --container <GTM-XXXX|id> --workspace <name|id> [--create]
+  gscode init <dir> --account <id> --container <GTM-XXXX|id> --workspace <name|id> [--create] [--adopt]
+                                     --adopt: the folder already has mirror files (a git clone); keep them
+  gscode tidy [dir]                  rename files to match their GTM names (keeps clones consistent)
   gscode status [dir]
   gscode pull [dir] [--no-sync]      sync the workspace to the latest version, then pull
   gscode watch [dir] [--interval <seconds>] [--verbose]
@@ -138,7 +140,7 @@ async function cmdWhoami() {
   out(`Publishing: ${scopes.some((scope) => scope.endsWith('tagmanager.publish')) ? 'allowed' : 'not allowed (signed in without the publish scope)'}`);
 }
 
-async function cmdInit(dir: string | undefined, values: { account?: string; container?: string; workspace?: string; create?: boolean }) {
+async function cmdInit(dir: string | undefined, values: { account?: string; container?: string; workspace?: string; create?: boolean; adopt?: boolean }) {
   if (!dir || !values.account || !values.container || !values.workspace) throw new GtmError('Usage: gscode init <dir> --account <id> --container <GTM-XXXX|id> --workspace <name|id> [--create]');
   const container = await resolveContainer(values.account, values.container);
   const workspaces = await api.listWorkspaces(container.accountId, container.containerId);
@@ -147,7 +149,7 @@ async function cmdInit(dir: string | undefined, values: { account?: string; cont
   if (!workspace) throw new GtmError(`Workspace "${values.workspace}" not found. Add --create to create it.`);
   const root = path.resolve(dir);
   await fs.mkdir(root, { recursive: true });
-  const result = await initMirror(root, api, container, workspace);
+  const result = await initMirror(root, api, container, workspace, { adopt: values.adopt === true });
   out(`Mirrored ${container.publicId} / ${workspace.name} into ${root}: ${describePull(result)}`);
 }
 
@@ -292,7 +294,7 @@ async function main(argv: string[]): Promise<void> {
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
       interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
-      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' },
+      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' },
     },
   });
   const [command, ...rest] = positionals;
@@ -305,6 +307,11 @@ async function main(argv: string[]): Promise<void> {
       return out(`Signed out (access revoked at Google)${values['forget-client'] ? ' and the OAuth client removed' : ''}.`);
     }
     case 'whoami': return cmdWhoami();
+    case 'tidy': {
+      const { renamed } = await tidyFileNames(root, await readState(root));
+      renamed.forEach(([from, to]) => out(`  ${from} → ${to}`));
+      return out(renamed.length ? `Renamed ${renamed.length} file(s).` : 'All file names already match GTM.');
+    }
     case 'accounts': return (await api.listAccounts()).forEach((a) => out(`${a.accountId}\t${a.name}`));
     case 'containers': return (await api.listContainers(rest[0] ?? '')).forEach((c) => out(`${c.publicId}\t${c.containerId}\t${c.usageContext.join(',')}\t${c.name}`));
     case 'workspaces': {

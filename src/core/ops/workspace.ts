@@ -4,7 +4,11 @@ import type { GtmApi } from '../api';
 import { BASE_DIR, FOLDERS_FILE, REMOTE_DIR, STATE_DIR } from '../mirror/layout';
 import { readModel, removeDoc, writeBuiltIns, writeDoc, writeFolders } from '../mirror/model';
 import { emptyState, hasState, readState, writeState, type MirrorState } from '../mirror/state';
-import { renderFiles, type EntityDoc } from '../serialize/entityFiles';
+import { withMirrorLock } from '../mirror/lock';
+import { allocateBase } from '../mirror/layout';
+import { KIND_SPECS } from '../kinds';
+import { canonicalJson } from '../serialize/canonical';
+import { docName, renderFiles, type EntityDoc } from '../serialize/entityFiles';
 import { GtmError, type ContainerInfo, type WorkspaceInfo } from '../types';
 import { workingStatus } from './plan';
 import { isServerContainer, type PullResult } from './pull';
@@ -29,7 +33,20 @@ export function assertSupportedContainer(container: ContainerInfo): void {
   }
 }
 
-export async function initMirror(root: string, api: GtmApi, container: ContainerInfo, workspace: WorkspaceInfo): Promise<PullResult> {
+export interface InitOptions {
+  /**
+   * The folder already holds mirror files (a git clone of a teammate's mirror): match them to GTM
+   * entities by kind and name, keep their file names, and treat any difference as your local edit.
+   */
+  readonly adopt?: boolean;
+}
+
+/** `.gtm/` is per person and per workspace; the files are what a team shares through git. */
+const GITIGNORE = `# GS Code: .gtm/ is this machine's link to one GTM workspace. Never commit it.
+.gtm/
+`;
+
+export async function initMirror(root: string, api: GtmApi, container: ContainerInfo, workspace: WorkspaceInfo, options: InitOptions = {}): Promise<PullResult> {
   assertSupportedContainer(container);
   if (await hasState(root)) {
     const existing = await readState(root);
@@ -39,14 +56,65 @@ export async function initMirror(root: string, api: GtmApi, container: Container
     return firstPull(root, api, existing);
   }
   const entries = await fs.readdir(root).catch(() => [] as string[]);
-  if (entries.some((entry) => !entry.startsWith('.'))) {
-    throw new GtmError(`${root} is not empty. Pick an empty folder for the mirror.`);
+  if (!options.adopt && entries.some((entry) => !entry.startsWith('.'))) {
+    throw new GtmError(`${root} is not empty. Pick an empty folder, or adopt the files already there (gscode init --adopt).`);
   }
   await fs.mkdir(path.join(root, STATE_DIR), { recursive: true });
   await fs.writeFile(path.join(root, STATE_DIR, 'README.txt'), README, 'utf8');
-  const state = emptyState(container, workspace);
+  if (!entries.includes('.gitignore')) await fs.writeFile(path.join(root, '.gitignore'), GITIGNORE, 'utf8');
+  const empty = emptyState(container, workspace);
+  const state = options.adopt ? await withAdoption(root, empty) : empty;
   await writeState(root, state);
   return firstPull(root, api, state);
+}
+
+/** Every existing entity file may be adopted by the first pull (by name, or by content when unnamed). */
+async function withAdoption(root: string, state: MirrorState): Promise<MirrorState> {
+  const { model } = await readModel(root, isServerContainer(state));
+  const created = Object.fromEntries([...model.docs.values()].map((doc) => [doc.base, canonicalJson(doc.data)]));
+  return { ...state, pendingPush: { pushed: {}, created, keepLocal: true } };
+}
+
+/**
+ * Rename files whose name no longer matches their GTM name (renamed in GTM, or created on another
+ * machine), so every clone of a shared mirror uses the same file names.
+ */
+export async function tidyFileNames(root: string, state: MirrorState): Promise<{ readonly state: MirrorState; readonly renamed: readonly [string, string][] }> {
+  return withMirrorLock(root, 'tidy', async () => {
+    const isServer = isServerContainer(state);
+    const baseRoot = path.join(root, BASE_DIR);
+    const local = (await readModel(root, isServer)).model;
+    const base = (await readModel(baseRoot, isServer)).model;
+    const taken = new Set([...local.docs.keys(), ...base.docs.keys()].map((item) => item.toLowerCase()));
+    const entities = { ...state.entities };
+    const renamed: [string, string][] = [];
+    const busy = new Set([...state.conflicts, ...state.gtmConflicts.map((item) => item.base)]);
+    for (const [from, entry] of Object.entries(state.entities)) {
+      const mine = local.docs.get(from);
+      const original = base.docs.get(from);
+      const doc = original ?? mine;
+      const name = doc ? docName(doc) : undefined;
+      if (busy.has(from) || !name || !KIND_SPECS[entry.kind].named) continue;
+      taken.delete(from.toLowerCase());
+      const to = allocateBase(entry.kind, name, entry.id, taken);
+      taken.add(to.toLowerCase());
+      if (to === from) continue;
+      if (mine) {
+        await writeDoc(root, { ...mine, base: to });
+        await removeDoc(root, mine);
+      }
+      if (original) {
+        await writeDoc(baseRoot, { ...original, base: to });
+        await removeDoc(baseRoot, original);
+      }
+      delete entities[from];
+      entities[to] = entry;
+      renamed.push([from, to]);
+    }
+    const next: MirrorState = { ...state, entities };
+    await writeState(root, next);
+    return { state: next, renamed };
+  });
 }
 
 /** A full pull that also records GTM's status and latest version, so the next check costs two requests. */

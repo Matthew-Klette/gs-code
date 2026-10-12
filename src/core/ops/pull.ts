@@ -135,7 +135,7 @@ export async function applySnapshot(
 
       const sentContent = sent?.content ?? (adopted ? created.get(adopted.base) : undefined);
       const isPushed = sentContent !== undefined;
-      const keptEdit = isPushed && editedSincePush(mine, sentContent);
+      const keptEdit = isPushed && (editedSincePush(mine, sentContent) || (adopted !== undefined && state.pendingPush?.keepLocal === true));
       const decided = keptEdit
         ? 'refresh-base'
         : decide({ remote, original, mine, forced: isPushed, broken: brokenLocal.has(target), isNew: !indexedBase });

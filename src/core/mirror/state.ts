@@ -37,6 +37,8 @@ export interface PendingPush {
   readonly pushed: Readonly<Record<string, PushedDoc>>;
   /** Unnamed or unmatched new entities: base path → canonical content sent; adopted by content. */
   readonly created: Readonly<Record<string, string>>;
+  /** Adopting existing files (init --adopt): GTM's copy becomes the base, the files stay as they are. */
+  readonly keepLocal?: boolean;
 }
 
 export interface PushedDoc {

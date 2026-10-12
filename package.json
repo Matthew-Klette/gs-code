@@ -153,6 +153,16 @@
         "command": "gsCode.removeClient",
         "title": "Remove OAuth Client",
         "category": "GS Code"
+      },
+      {
+        "command": "gsCode.adoptFolder",
+        "title": "Adopt Folder (git clone of a mirror)…",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.tidy",
+        "title": "Rename Files to Match GTM",
+        "category": "GS Code"
       }
     ],
     "menus": {

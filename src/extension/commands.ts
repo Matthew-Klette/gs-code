@@ -10,7 +10,7 @@ import { readState } from '../core/mirror/state';
 import { assertNotProtected, createVersion } from '../core/ops/publish';
 import { pushWorkspace, type PushStrategy } from '../core/ops/push';
 import { refreshMirror, resolveGtmConflict, switchWorkspace, type GtmResolution, type RefreshResult } from '../core/ops/sync';
-import { discardChanges, initMirror, resolveConflict } from '../core/ops/workspace';
+import { discardChanges, initMirror, resolveConflict, tidyFileNames } from '../core/ops/workspace';
 import { WorkspaceGoneError, type ContainerInfo, type WorkspaceInfo } from '../core/types';
 import { FileCredentialStore } from '../cli/fileStore';
 import { autoPullConfig, dirtyOverlay, type MirrorController, type ResourceState } from './mirror';
@@ -100,6 +100,18 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
     register('refresh', async (arg) => (await pickController(deps, arg))?.refresh()),
     register('pull', (arg) => pull(deps, arg)),
     register('switchWorkspace', (arg) => switchTo(deps, arg)),
+    register('adoptFolder', () => adoptFolder(deps)),
+    register('tidy', async (arg) => {
+      const controller = await pickController(deps, arg);
+      if (!controller?.state) return;
+      const result = await run(deps, 'Renaming files to match GTM…', () =>
+        controller.exclusive(async () => tidyFileNames(controller.root, await readState(controller.root))),
+      );
+      if (!result) return;
+      result.renamed.forEach(([from, to]) => deps.output.appendLine(`renamed ${from} → ${to}`));
+      await controller.refresh();
+      void vscode.window.showInformationMessage(result.renamed.length ? `Renamed ${result.renamed.length} file(s) to match GTM.` : 'All file names already match GTM.');
+    }),
     register('push', (arg) => push(deps, arg)),
     register('createVersion', (arg) => version(deps, arg, false)),
     register('publish', (arg) => version(deps, arg, true)),
@@ -222,6 +234,27 @@ async function openWorkspace(deps: CommandDeps): Promise<void> {
     vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length ?? 0, 0, { uri: vscode.Uri.file(root) });
     await deps.addMirror(root);
   }
+}
+
+/** A folder cloned from git (a teammate's mirror) gets its own link to a workspace; the files stay as they are. */
+async function adoptFolder(deps: CommandDeps): Promise<void> {
+  const folder = await vscode.window.showOpenDialog({ canSelectFolders: true, canSelectFiles: false, openLabel: 'Adopt this folder', title: 'Folder with GS Code mirror files (e.g. a git clone)' });
+  if (!folder?.[0]) return;
+  const accounts = await run(deps, 'Loading accounts…', () => deps.api.listAccounts());
+  if (!accounts) return;
+  const account = await vscode.window.showQuickPick(accounts.map((item) => ({ label: item.name, description: item.accountId, item })), { placeHolder: 'GTM account' });
+  if (!account) return;
+  const containers = await run(deps, 'Loading containers…', () => deps.api.listContainers(account.item.accountId));
+  if (!containers) return;
+  const container = await vscode.window.showQuickPick(containers.map((item) => ({ label: item.name, description: item.publicId, item })), { placeHolder: 'Container these files belong to' });
+  if (!container) return;
+  const workspace = await pickWorkspace(deps, container.item, 'Your own workspace for these files (create one per person)');
+  if (!workspace) return;
+  const root = folder[0].fsPath;
+  const result = await run(deps, `Adopting ${path.basename(root)}…`, () => initMirror(root, deps.api, container.item, workspace, { adopt: true }));
+  if (!result) return;
+  await deps.addMirror(root);
+  void vscode.window.showInformationMessage(`Linked ${path.basename(root)} to ${container.item.publicId} / "${workspace.name}". Differences from GTM show as your changes.`);
 }
 
 async function pickWorkspace(deps: CommandDeps, container: ContainerInfo, placeHolder = 'Workspace'): Promise<WorkspaceInfo | undefined> {
