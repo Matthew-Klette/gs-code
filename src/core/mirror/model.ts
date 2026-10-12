@@ -29,8 +29,13 @@ export interface ReadResult {
 
 export const EMPTY_MODEL: MirrorModel = { docs: new Map(), folders: [], builtIns: [] };
 
-export function fileReader(root: string): ReadFile {
+/** Unsaved editor contents by mirror-relative path (`tags/A.json`). They win over the file on disk. */
+export type Overlay = ReadonlyMap<string, string>;
+
+export function fileReader(root: string, overlay?: Overlay): ReadFile {
   return async (relPath) => {
+    const unsaved = overlay?.get(relPath);
+    if (unsaved !== undefined) return unsaved;
     try {
       return await fs.readFile(path.join(root, relPath), 'utf8');
     } catch {
@@ -51,8 +56,8 @@ async function listDir(dir: string): Promise<{ files: string[]; dirs: string[] }
   }
 }
 
-export async function readModel(root: string, isServer: boolean): Promise<ReadResult> {
-  const read = fileReader(root);
+export async function readModel(root: string, isServer: boolean, overlay?: Overlay): Promise<ReadResult> {
+  const read = fileReader(root, overlay);
   const docs = new Map<string, EntityDoc>();
   const problems: ParseProblem[] = [];
   const capture = async (relPath: string, load: () => Promise<EntityDoc>) => {

@@ -2,22 +2,28 @@ import type { GtmApi } from '../api';
 import { KIND_ORDER, KIND_SPECS, type EntityKind } from '../kinds';
 import { countChanges, isEmpty, type ChangeSet, type EntityChange, type FolderChange } from '../mirror/diff';
 import { entityLabel } from '../mirror/layout';
-import { entityKey, type MirrorState } from '../mirror/state';
+import type { Overlay } from '../mirror/model';
+import { entityKey, writeState, type MirrorState } from '../mirror/state';
 import { docName, toApiBody, type EntityDoc } from '../serialize/entityFiles';
 import { collectTriggerReferences, templateType, type IdLookup } from '../serialize/references';
 import { GtmError, type ApiEntity, type BulkEntity, type RemoteSnapshot } from '../types';
 import { workingStatus } from './plan';
 import { applySnapshot, type PullResult } from './pull';
+import { refreshMirror, statusSignature, type RefreshResult } from './sync';
 
 export type PushStrategy = 'bulk' | 'sequential';
 
 export interface PushOptions {
   readonly strategy?: PushStrategy;
   readonly onProgress?: (message: string) => void;
+  /** Unsaved editor buffers, so the pre-push refresh never overwrites them. */
+  readonly overlay?: Overlay;
 }
 
 export interface PushResult {
   readonly pushed: number;
+  /** The pull that ran before pushing, when GTM had changed. */
+  readonly before?: RefreshResult;
   readonly refresh?: PullResult;
 }
 
@@ -42,15 +48,27 @@ interface Applied {
   readonly hints: Map<string, string>;
 }
 
-export async function pushWorkspace(root: string, api: GtmApi, state: MirrorState, options: PushOptions = {}): Promise<PushResult> {
+/**
+ * Pull first (cheap when GTM is unchanged), stop on any conflict, then push.
+ * Remote-only changes are merged in before anything is sent, so a push never undoes them.
+ */
+export async function pushWorkspace(root: string, api: GtmApi, initial: MirrorState, options: PushOptions = {}): Promise<PushResult> {
   const progress = options.onProgress ?? (() => undefined);
+  assertReady(await workingStatus(root, initial), initial);
+  if (isEmpty((await workingStatus(root, initial)).changes)) return { pushed: 0 };
+
+  progress('Checking GTM for changes before pushing…');
+  const pulled = await refreshMirror(root, api, initial, { overlay: options.overlay, onProgress: progress });
+  const state = pulled.state;
   const status = await workingStatus(root, state);
-  assertPushable(
-    status.problems.map((problem) => `${problem.path}: ${problem.message}`),
-    status.issues.filter((issue) => issue.severity === 'error').map((issue) => `${issue.path}: ${issue.message}`),
-    state.conflicts,
-  );
-  if (isEmpty(status.changes)) return { pushed: 0 };
+  if (state.conflicts.length || state.gtmConflicts.length) {
+    throw new PushBlockedError('GTM had changes that conflict with yours. Nothing was pushed. Resolve these, then Push again:', [
+      ...state.conflicts.map((base) => `${base}: changed locally and in GTM (Keep Mine / Take Theirs)`),
+      ...state.gtmConflicts.map((item) => `${item.base}: GTM merge conflict with the latest version (Keep Workspace / Take Latest)`),
+    ]);
+  }
+  assertReady(status, state);
+  if (isEmpty(status.changes)) return { pushed: 0, before: pulled };
 
   progress('Checking GTM for changes made since your last pull…');
   const before = await api.fetchSnapshot(state.workspace, state.container.usageContext);
@@ -69,13 +87,26 @@ export async function pushWorkspace(root: string, api: GtmApi, state: MirrorStat
   }
 
   progress('Refreshing from GTM…');
+  // Status before snapshot: a change landing in between is picked up by the next check.
+  const remoteStatus = await api.getWorkspaceStatus(state.workspace);
   const after = await api.fetchSnapshot(state.workspace, state.container.usageContext);
-  const refresh = await applySnapshot(root, state, after, { forceRemote: applied.forced, pathHints: applied.hints, adoptPushed: true });
+  const applied_ = await applySnapshot(root, state, after, { forceRemote: applied.forced, pathHints: applied.hints, adoptPushed: true, overlay: options.overlay });
+  const refreshed: MirrorState = { ...applied_.state, remote: { ...state.remote, status: statusSignature(remoteStatus) } };
+  await writeState(root, refreshed);
+  const refresh = { ...applied_, state: refreshed };
   if (failure) {
     const message = failure instanceof Error ? failure.message : String(failure);
     throw new GtmError(`Push stopped: ${message}\nAnything already applied is now in sync; the rest is still a local change.`);
   }
-  return { pushed: total, refresh };
+  return { pushed: total, before: pulled, refresh };
+}
+
+function assertReady(status: Awaited<ReturnType<typeof workingStatus>>, state: MirrorState): void {
+  assertPushable(
+    status.problems.map((problem) => `${problem.path}: ${problem.message}`),
+    status.issues.filter((issue) => issue.severity === 'error').map((issue) => `${issue.path}: ${issue.message}`),
+    state.conflicts,
+  );
 }
 
 function assertPushable(problems: string[], errors: string[], conflicts: readonly string[]): void {

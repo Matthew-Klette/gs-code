@@ -186,8 +186,11 @@ describe('push safety', () => {
     const tag = await readJson('tags/GA4 - purchase.json');
     await writeJson('tags/GA4 - purchase.json', { ...tag, notes: 'mine' });
     gtm.remoteEdit('tag', 'GA4 - purchase', { notes: 'theirs' });
-    await expect(push()).rejects.toThrow(/changed in GTM/);
+    // Push pulls first; the remote edit meets the local one and becomes a conflict. Nothing is sent.
+    await expect(push()).rejects.toThrow(/tags\/GA4 - purchase: changed locally and in GTM/);
     expect(gtm.find('tag', 'GA4 - purchase')?.notes).toBe('theirs');
+    expect((await state()).conflicts).toEqual(['tags/GA4 - purchase']);
+    expect((await readJson('tags/GA4 - purchase.json')).notes).toBe('mine');
   });
 
   it('is a no-op when nothing changed', async () => {

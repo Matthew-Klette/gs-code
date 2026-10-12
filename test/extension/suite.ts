@@ -25,7 +25,7 @@ export async function run(): Promise<void> {
   log('extension activates from workspaceContains:.gtm/state.json');
 
   const commands = await vscode.commands.getCommands(true);
-  const expected = ['configureClient', 'signIn', 'signOut', 'open', 'pull', 'push', 'refresh', 'createVersion', 'publish', 'openInGtm', 'discard', 'resolveMine', 'resolveTheirs'];
+  const expected = ['configureClient', 'signIn', 'signOut', 'open', 'pull', 'push', 'refresh', 'createVersion', 'publish', 'openInGtm', 'discard', 'resolveMine', 'resolveTheirs', 'gtmKeepWorkspace', 'gtmTakeLatest'];
   for (const id of expected) assert.ok(commands.includes(`gsCode.${id}`), `command gsCode.${id} registered`);
   log(`all ${expected.length} commands registered`);
 
@@ -34,6 +34,11 @@ export async function run(): Promise<void> {
   assert.equal(controller.scm.count, 0);
   assert.equal(controller.label, 'GTM-TEST123 · Default Workspace');
   log('mirror detected, clean, Source Control labelled GTM GTM-TEST123');
+
+  // This test profile is not signed in: the auto-pull that starts when a mirror opens must fail as a sign-in error and stop, not retry forever.
+  await waitFor('auto-pull ran on open and stopped (signed out)', () => controller.autoPull.lastError !== undefined && !controller.autoPull.active);
+  assert.match(String((controller.autoPull.lastError as Error).message), /Sign In|OAuth client/);
+  log('auto-pull runs as soon as the mirror opens; a sign-in error stops it cleanly');
 
   const tagFile = path.join(mirror, 'tags', 'GA4 - purchase.json');
   const tag = JSON.parse(await readFile(tagFile, 'utf8'));

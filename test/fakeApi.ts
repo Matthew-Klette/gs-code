@@ -1,17 +1,32 @@
 import type { GtmApi } from '../src/core/api';
-import { KIND_ORDER, KIND_SPECS, type EntityKind } from '../src/core/kinds';
+import { KIND_ORDER, KIND_SPECS, VOLATILE_FIELDS, type EntityKind } from '../src/core/kinds';
+import { canonicalJson } from '../src/core/serialize/canonical';
 import {
   GtmError,
   workspacePath,
   type AccountInfo,
+  type ApiChange,
   type ApiEntity,
+  type ApiMergeConflict,
   type BulkEntity,
   type ContainerInfo,
   type CreateVersionResult,
   type RemoteSnapshot,
+  type SyncResult,
   type WorkspaceInfo,
   type WorkspaceRef,
+  type WorkspaceStatus,
 } from '../src/core/types';
+
+type Contents = Record<EntityKind, ApiEntity[]>;
+
+const emptyContents = (): Contents => Object.fromEntries(KIND_ORDER.map((kind) => [kind, []])) as unknown as Contents;
+
+/** Entity content without the fields GTM owns, for "did this change" comparisons. */
+function content(entity: ApiEntity | undefined): string | undefined {
+  if (!entity) return undefined;
+  return canonicalJson(Object.fromEntries(Object.entries(entity).filter(([key]) => !VOLATILE_FIELDS.includes(key))));
+}
 
 export const CONTAINER: ContainerInfo = {
   accountId: '100',
@@ -31,9 +46,48 @@ export class FakeGtm implements GtmApi {
   calls: string[] = [];
   versions: { id: string; name: string; published: boolean }[] = [];
   failBulk = false;
+  /** Contents of every container version, by version id. */
+  versionContents = new Map<string, Contents>();
+  /** The container version this workspace is based on (what getStatus diffs against). */
+  baseContents: Contents = emptyContents();
+  baseVersionId?: string;
+  mergeConflicts: ApiMergeConflict[] = [];
   private nextId = 1000;
   private clock = 1;
 
+  /** Treat the current contents as the published baseline (version 0), like a fresh workspace. */
+  markBaseline(): void {
+    this.baseContents = structuredClone(this.entities);
+  }
+
+  /**
+   * Someone edits and publishes another workspace: a new container version that our
+   * workspace does not have yet.
+   */
+  publishElsewhere(name: string, edit: (contents: Contents) => Contents): string {
+    const latestId = this.versions.at(-1)?.id;
+    const previous = latestId ? (this.versionContents.get(latestId) as Contents) : this.baseContents;
+    const edited = edit(structuredClone(previous));
+    const id = String(this.versions.length + 1);
+    this.versions = [...this.versions, { id, name, published: true }];
+    this.versionContents.set(id, edited);
+    return id;
+  }
+
+  /** Stamp an entity for publishElsewhere (new fingerprint). */
+  restamp(kind: EntityKind, entity: ApiEntity): ApiEntity {
+    return this.stamp(kind, entity);
+  }
+
+  /** Someone creates a version from our workspace in the GTM UI: it is deleted and a new Default Workspace appears. */
+  versionFromUi(): void {
+    const id = String(this.versions.length + 1);
+    this.versions = [...this.versions, { id, name: 'from UI', published: true }];
+    this.versionContents.set(id, structuredClone(this.entities));
+    this.baseContents = structuredClone(this.entities);
+    this.baseVersionId = id;
+    this.workspace = { ...this.workspace, workspaceId: String(this.nextId++), name: 'Default Workspace' };
+  }
   seed(kind: EntityKind, entity: ApiEntity): ApiEntity {
     const created = this.stamp(kind, { ...entity, [KIND_SPECS[kind].idField]: entity[KIND_SPECS[kind].idField] ?? String(this.nextId++) });
     this.entities[kind] = [...this.entities[kind], created];
@@ -58,12 +112,94 @@ export class FakeGtm implements GtmApi {
   }
 
   async listWorkspaces(): Promise<WorkspaceInfo[]> {
+    this.calls.push('listWorkspaces');
     return [this.workspace];
   }
 
   async createWorkspace(_a: string, _c: string, name: string): Promise<WorkspaceInfo> {
+    this.calls.push(`createWorkspace ${name}`);
     this.workspace = { ...this.workspace, workspaceId: String(this.nextId++), name };
     return this.workspace;
+  }
+
+  async getWorkspaceStatus(ref: WorkspaceRef): Promise<WorkspaceStatus> {
+    this.assertWorkspace(ref);
+    this.calls.push('status');
+    const workspaceChange: ApiChange[] = [];
+    for (const kind of KIND_ORDER) {
+      const field = KIND_SPECS[kind].entityField;
+      const base = new Map(this.baseContents[kind].map((entity) => [this.idOf(kind, entity), entity]));
+      const mine = new Map(this.entities[kind].map((entity) => [this.idOf(kind, entity), entity]));
+      for (const [id, entity] of mine) {
+        if (!base.has(id)) workspaceChange.push({ changeStatus: 'added', [field]: structuredClone(entity) });
+        else if (content(base.get(id)) !== content(entity)) workspaceChange.push({ changeStatus: 'updated', [field]: structuredClone(entity) });
+      }
+      for (const [id, entity] of base) if (!mine.has(id)) workspaceChange.push({ changeStatus: 'deleted', [field]: structuredClone(entity) });
+    }
+    return { workspaceChange, mergeConflict: structuredClone(this.mergeConflicts) };
+  }
+
+  async latestVersionId(): Promise<string | undefined> {
+    this.calls.push('latestVersion');
+    return this.versions.at(-1)?.id;
+  }
+
+  /** Three-way: entities untouched in the workspace take the latest version; changed on both sides conflict. */
+  async syncWorkspace(ref: WorkspaceRef): Promise<SyncResult> {
+    this.assertWorkspace(ref);
+    this.calls.push('sync');
+    const latestId = this.versions.at(-1)?.id;
+    if (!latestId || latestId === this.baseVersionId) return { mergeConflict: this.mergeConflicts.length > 0, syncError: false, conflicts: this.mergeConflicts };
+    const latest = this.versionContents.get(latestId) as Contents;
+    const conflicts: ApiMergeConflict[] = [];
+    const next = emptyContents();
+    for (const kind of KIND_ORDER) {
+      const field = KIND_SPECS[kind].entityField;
+      const maps = [this.baseContents[kind], this.entities[kind], latest[kind]].map((list) => new Map(list.map((entity) => [this.idOf(kind, entity), entity])));
+      const [base, mine, theirs] = maps as [Map<string, ApiEntity>, Map<string, ApiEntity>, Map<string, ApiEntity>];
+      for (const id of new Set([...base.keys(), ...mine.keys(), ...theirs.keys()])) {
+        const changedHere = content(mine.get(id)) !== content(base.get(id));
+        const changedThere = content(theirs.get(id)) !== content(base.get(id));
+        const keep = changedThere && !changedHere ? theirs.get(id) : mine.get(id);
+        if (keep) next[kind].push(this.stamp(kind, keep));
+        if (changedHere && changedThere && content(mine.get(id)) !== content(theirs.get(id))) {
+          const side = (entity: ApiEntity | undefined, fallback: ApiEntity | undefined): ApiChange => ({
+            changeStatus: entity ? 'updated' : 'deleted',
+            [field]: structuredClone(entity ?? fallback),
+          });
+          conflicts.push({ entityInWorkspace: side(mine.get(id), base.get(id)), entityInBaseVersion: side(theirs.get(id), base.get(id)) });
+        }
+      }
+    }
+    this.entities = next;
+    // Re-read the conflicting workspace side so its fingerprint matches what resolve_conflict expects.
+    this.mergeConflicts = conflicts.map((conflict) => {
+      const side = conflict.entityInWorkspace as ApiChange;
+      const kind = KIND_ORDER.find((item) => side[KIND_SPECS[item].entityField]) as EntityKind;
+      const current = this.entities[kind].find((entity) => this.idOf(kind, entity) === this.idOf(kind, side[KIND_SPECS[kind].entityField] as ApiEntity));
+      return current ? { ...conflict, entityInWorkspace: { ...side, [KIND_SPECS[kind].entityField]: structuredClone(current) } } : conflict;
+    });
+    this.baseContents = structuredClone(latest);
+    this.baseVersionId = latestId;
+    return { mergeConflict: conflicts.length > 0, syncError: false, conflicts: structuredClone(this.mergeConflicts) };
+  }
+
+  async resolveConflict(ref: WorkspaceRef, entity: ApiChange, fingerprint?: string): Promise<void> {
+    this.assertWorkspace(ref);
+    this.calls.push('resolveConflict');
+    const kind = KIND_ORDER.find((item) => entity[KIND_SPECS[item].entityField]) as EntityKind;
+    const body = entity[KIND_SPECS[kind].entityField] as ApiEntity;
+    const id = this.idOf(kind, body);
+    const index = this.mergeConflicts.findIndex((conflict) => {
+      const side = conflict.entityInWorkspace?.[KIND_SPECS[kind].entityField] as ApiEntity | undefined;
+      return side && this.idOf(kind, side) === id;
+    });
+    if (index < 0) throw new GtmError(`no merge conflict for ${kind} ${id}`, 400);
+    const current = this.entities[kind].find((item) => this.idOf(kind, item) === id);
+    if (fingerprint && current?.fingerprint !== fingerprint) throw new GtmError('fingerprint mismatch', 409);
+    const others = this.entities[kind].filter((item) => this.idOf(kind, item) !== id);
+    this.entities[kind] = entity.changeStatus === 'deleted' ? others : [...others, this.stamp(kind, body)];
+    this.mergeConflicts = this.mergeConflicts.filter((_, i) => i !== index);
   }
 
   async getWorkspace(ref: WorkspaceRef): Promise<WorkspaceInfo> {
@@ -159,8 +295,12 @@ export class FakeGtm implements GtmApi {
   async createVersion(ref: WorkspaceRef, name: string): Promise<CreateVersionResult> {
     this.assertWorkspace(ref);
     this.calls.push('createVersion');
+    if (this.mergeConflicts.length) return { compilerError: false, syncStatus: { mergeConflict: true } };
     const id = String(this.versions.length + 1);
     this.versions = [...this.versions, { id, name, published: false }];
+    this.versionContents.set(id, structuredClone(this.entities));
+    this.baseContents = structuredClone(this.entities);
+    this.baseVersionId = id;
     this.workspace = { ...this.workspace, workspaceId: String(this.nextId++), name: 'Default Workspace' };
     this.entities = Object.fromEntries(
       KIND_ORDER.map((kind) => [kind, this.entities[kind].map((entity) => this.stamp(kind, entity))]),
@@ -184,6 +324,10 @@ export class FakeGtm implements GtmApi {
       path: `${workspacePath(this.workspace)}/${KIND_SPECS[kind].collection}/${String(entity[KIND_SPECS[kind].idField])}`,
       fingerprint: String(this.clock++),
     };
+  }
+
+  private idOf(kind: EntityKind, entity: ApiEntity): string {
+    return String(entity[KIND_SPECS[kind].idField]);
   }
 
   private byId(kind: EntityKind, id: string): ApiEntity {
@@ -217,5 +361,6 @@ export function seededFake(): FakeGtm {
   gtm.seed('trigger', { triggerId: '21', name: 'TG - purchase group', type: 'triggerGroup', parameter: [{ type: 'LIST', key: 'triggerIds', list: [{ type: 'TRIGGER_REFERENCE', value: '20' }] }] });
   gtm.seed('tag', { tagId: '30', name: 'GA4 - purchase', type: 'gaawe', parentFolderId: '1', firingTriggerId: ['20'], parameter: [{ type: 'TEMPLATE', key: 'eventName', value: 'purchase' }, { type: 'TEMPLATE', key: 'userId', value: '{{DL - user_id}}' }] });
   gtm.seed('tag', { tagId: '31', name: 'cHTML - hello', type: 'html', firingTriggerId: ['2147479553'], parameter: [{ type: 'TEMPLATE', key: 'html', value: '<script>\n  console.log("hi");\n</script>' }] });
+  gtm.markBaseline();
   return gtm;
 }

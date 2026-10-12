@@ -6,6 +6,8 @@ export const STATE_FILE = `${STATE_DIR}/state.json`;
 export const BASE_DIR = `${STATE_DIR}/base`;
 /** Remote copies of entities in conflict, for side-by-side comparison. */
 export const REMOTE_DIR = `${STATE_DIR}/remote`;
+/** Latest container version's copy of entities in a GTM merge conflict. */
+export const MERGE_DIR = `${STATE_DIR}/merge`;
 export const FOLDERS_FILE = 'folders.json';
 export const BUILTINS_FILE = 'built-in-variables.json';
 

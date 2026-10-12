@@ -1,6 +1,6 @@
 import { OAuth2Client, type Credentials } from 'google-auth-library';
 import type { TokenProvider } from '../api';
-import { GtmError } from '../types';
+import { AuthError, GtmError } from '../types';
 import { waitForLoopbackCode } from './loopback';
 
 const BASE_SCOPES = [
@@ -86,14 +86,14 @@ export class GoogleTokenProvider implements TokenProvider {
     const client = await this.ensureClient();
     try {
       const { token } = await client.getAccessToken();
-      if (!token) throw new GtmError('Could not get an access token. Sign in again.');
+      if (!token) throw new AuthError('Could not get an access token. Sign in again.');
       return token;
     } catch (error: unknown) {
       if (error instanceof GtmError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       if (/invalid_grant/i.test(message)) {
         this.client = undefined;
-        throw new GtmError('Your Google sign-in expired or was revoked. Sign in again.');
+        throw new AuthError('Your Google sign-in expired or was revoked. Sign in again.');
       }
       throw new GtmError(`Token refresh failed: ${message}`);
     }
@@ -116,8 +116,8 @@ export class GoogleTokenProvider implements TokenProvider {
     if (this.client) return this.client;
     const config = await this.store.loadClient();
     const tokens = await this.store.loadTokens();
-    if (!config) throw new GtmError('No OAuth client configured. Run "Configure OAuth Client" first.');
-    if (!tokens?.refresh_token) throw new GtmError('Not signed in. Run "Sign In" first.');
+    if (!config) throw new AuthError('No OAuth client configured. Run "Configure OAuth Client" first.');
+    if (!tokens?.refresh_token) throw new AuthError('Not signed in. Run "Sign In" first.');
     const client = new OAuth2Client({ clientId: config.clientId, clientSecret: config.clientSecret });
     client.setCredentials(tokens);
     client.on('tokens', (fresh) => {

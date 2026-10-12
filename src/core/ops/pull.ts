@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { GtmApi } from '../api';
 import { KIND_ORDER, KIND_SPECS, VOLATILE_FIELDS } from '../kinds';
-import { allocateBase, BASE_DIR, FOLDERS_FILE, REMOTE_DIR } from '../mirror/layout';
+import { allocateBase, BASE_DIR, BUILTINS_FILE, FOLDERS_FILE, REMOTE_DIR } from '../mirror/layout';
 import {
   readModel,
   removeDoc,
@@ -12,10 +12,11 @@ import {
   writeFolders,
   type FolderDoc,
   type MirrorModel,
+  type Overlay,
 } from '../mirror/model';
 import { entityKey, writeState, type FolderEntry, type IndexEntry, type MirrorState } from '../mirror/state';
 import { canonicalJson } from '../serialize/canonical';
-import { docName, toLocalData, type EntityDoc } from '../serialize/entityFiles';
+import { docName, renderFiles, toLocalData, type EntityDoc } from '../serialize/entityFiles';
 import { buildRefContext } from '../serialize/references';
 import type { ApiEntity, RemoteSnapshot } from '../types';
 
@@ -29,6 +30,11 @@ export interface ApplyOptions {
    * (same name, or same content for unnamed kinds) is that file, just created. Take the remote.
    */
   readonly adoptPushed?: boolean;
+  /**
+   * Unsaved editor buffers (mirror-relative path → text). They count as local edits and
+   * their files are never written: a remote change to one becomes a conflict instead.
+   */
+  readonly overlay?: Overlay;
 }
 
 export interface PullResult {
@@ -43,6 +49,8 @@ export interface PullResult {
   readonly conflicts: readonly string[];
   /** Changed locally but deleted in GTM. Kept as a local addition. */
   readonly orphaned: readonly string[];
+  /** Whole files with unsaved edits whose remote update waits until they are saved. */
+  readonly deferred: readonly string[];
 }
 
 export function isServerContainer(state: MirrorState): boolean {
@@ -64,7 +72,8 @@ export async function applySnapshot(
   const isServer = isServerContainer(state);
   const baseRoot = path.join(root, BASE_DIR);
   const remoteRoot = path.join(root, REMOTE_DIR);
-  const localRead = await readModel(root, isServer);
+  const overlay = options.overlay;
+  const localRead = await readModel(root, isServer, overlay);
   const base = (await readModel(baseRoot, isServer)).model;
   const local = localRead.model;
   const brokenLocal = new Set(localRead.problems.map((problem) => problemBase(problem.path)));
@@ -77,7 +86,8 @@ export async function applySnapshot(
   const taken = new Set([...local.docs.keys(), ...base.docs.keys(), ...brokenLocal].map((item) => item.toLowerCase()));
 
   const entities: Record<string, IndexEntry> = {};
-  const result = { updated: [] as string[], added: [] as string[], removed: [] as string[], conflicts: [] as string[], orphaned: [] as string[] };
+  const result = { updated: [] as string[], added: [] as string[], removed: [] as string[], conflicts: [] as string[], orphaned: [] as string[], deferred: [] as string[] };
+  const isDirty = (doc: EntityDoc | undefined) => !!doc && !!overlay && [...renderFiles(doc).keys()].some((file) => overlay.has(file));
   const seen = new Set<string>();
   const conflictFingerprints: Record<string, string> = {};
   const indexedBases = new Set(Object.keys(state.entities));
@@ -115,7 +125,9 @@ export async function applySnapshot(
       }
 
       const isForced = forced.has(key) || (adopted !== undefined && options.adoptPushed === true);
-      const outcome = decide({ remote, original, mine, forced: isForced, broken: brokenLocal.has(target), isNew: !indexedBase });
+      const decided = decide({ remote, original, mine, forced: isForced, broken: brokenLocal.has(target), isNew: !indexedBase });
+      // Never write under an open editor with unsaved edits: show the remote side as a conflict instead.
+      const outcome = decided === 'take-remote' && !sameDoc(mine, remote) && isDirty(mine) ? 'conflict' : decided;
       switch (outcome) {
         case 'take-remote': {
           const changedLocally = !sameDoc(mine, remote);
@@ -159,7 +171,7 @@ export async function applySnapshot(
       entities[indexedBase] = state.entities[indexedBase] as IndexEntry;
       continue;
     }
-    if (!mine || sameDoc(mine, original)) {
+    if (!mine || (sameDoc(mine, original) && !isDirty(mine))) {
       if (mine) await removeDoc(root, mine);
       result.removed.push(indexedBase);
     } else {
@@ -168,11 +180,20 @@ export async function applySnapshot(
     if (original) await removeDoc(baseRoot, original);
   }
 
-  const folderMerge = await mergeFolders(root, baseRoot, remoteRoot, local, base, snapshot, state.folders);
-  const folders = folderMerge.entries;
-  for (const [name, fingerprint] of Object.entries(folderMerge.remoteFingerprints)) conflictFingerprints[`folder:${name}`] = fingerprint;
-  if (folderMerge.collided.length) result.conflicts.push(FOLDERS_FILE);
-  const builtIns = await mergeBuiltIns(root, baseRoot, local, base, snapshot);
+  const remoteFolders = snapshot.entities.folder.map(toFolderDoc);
+  const deferFolders = overlay?.has(FOLDERS_FILE) === true && !sameList(remoteFolders, base.folders);
+  let folders = state.folders;
+  if (deferFolders) {
+    result.deferred.push(FOLDERS_FILE);
+  } else {
+    const folderMerge = await mergeFolders(root, baseRoot, remoteRoot, local, base, snapshot, state.folders);
+    folders = folderMerge.entries;
+    for (const [name, fingerprint] of Object.entries(folderMerge.remoteFingerprints)) conflictFingerprints[`folder:${name}`] = fingerprint;
+    if (folderMerge.collided.length) result.conflicts.push(FOLDERS_FILE);
+  }
+  const remoteBuiltIns = snapshot.builtInVariables.map((item) => item.type);
+  if (overlay?.has(BUILTINS_FILE) === true && !sameList(remoteBuiltIns, base.builtIns)) result.deferred.push(BUILTINS_FILE);
+  else await mergeBuiltIns(root, baseRoot, local, base, snapshot);
 
   const nextState: MirrorState = {
     ...state,
@@ -181,6 +202,7 @@ export async function applySnapshot(
     folders,
     conflicts: result.conflicts,
     conflictFingerprints,
+    deferred: result.deferred,
     builtInNames: Object.fromEntries(snapshot.builtInVariables.filter((item) => item.name).map((item) => [item.type, item.name as string])),
   };
   await writeState(root, nextState);
@@ -299,6 +321,11 @@ export function threeWay<T>(local: [string, T][], base: [string, T][], remote: [
     if (mine !== undefined && canonicalJson(mine) === canonicalJson(before)) result.delete(key);
   }
   return [...result.values()];
+}
+
+function sameList(a: readonly unknown[], b: readonly unknown[]): boolean {
+  const sorted = (items: readonly unknown[]) => items.map((item) => canonicalJson(item)).sort();
+  return canonicalJson(sorted(a)) === canonicalJson(sorted(b));
 }
 
 function sortByName(folders: readonly FolderDoc[]): FolderDoc[] {

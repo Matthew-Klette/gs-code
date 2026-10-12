@@ -4,13 +4,41 @@ import { HttpGtmApi } from '../core/api';
 import { GoogleTokenProvider } from '../core/auth/oauth';
 import { STATE_FILE } from '../core/mirror/layout';
 import { hasState } from '../core/mirror/state';
+import { clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/autoPull';
 import { registerCommands } from './commands';
-import { GtmDecorations, MirrorController } from './mirror';
+import { GtmDecorations, MirrorController, type AutoPullSettings } from './mirror';
 import { SecretCredentialStore } from './secretStore';
 
 /** Returned from activate() so integration tests can inspect state. */
 export interface GsCodeExtensionApi {
   readonly controllers: () => readonly MirrorController[];
+}
+
+/** Focusing the window checks GTM unless a check ran this recently. */
+const FOCUS_RECHECK_MS = 10_000;
+/** How often the "synced X ago" text is redrawn. */
+const STATUS_TICK_MS = 15_000;
+
+function autoPullSettings(): AutoPullSettings {
+  const section = vscode.workspace.getConfiguration('gsCode.autoPull');
+  return {
+    enabled: section.get<boolean>('enabled', true),
+    intervalMs: clampInterval(section.get<number>('intervalSeconds', DEFAULT_INTERVAL_SECONDS)),
+  };
+}
+
+export function formatAgo(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 45) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`;
+}
+
+function syncedAt(controller: MirrorController): number | undefined {
+  const pulled = controller.state?.pulledAt ? Date.parse(controller.state.pulledAt) : undefined;
+  return controller.autoPull.lastCheckedAt ?? pulled;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<GsCodeExtensionApi> {
@@ -31,15 +59,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
     const list = [...controllers.values()];
     if (list.length === 0) return statusBar.hide();
     const pending = list.reduce((sum, controller) => sum + controller.scm.count!, 0);
-    statusBar.text = `$(tag) ${list.length === 1 ? list[0]!.label : `${list.length} GTM workspaces`}${pending ? ` $(cloud-upload) ${pending}` : ''}`;
-    statusBar.tooltip = 'GS Code: open Source Control';
+    const now = Date.now();
+    const oldest = Math.min(...list.map((controller) => syncedAt(controller) ?? 0));
+    const failing = list.some((controller) => controller.autoPull.lastError !== undefined);
+    const synced = failing ? '$(warning) sync failed' : oldest ? `$(sync) ${formatAgo(now - oldest)}` : '$(sync) not synced';
+    statusBar.text = `$(tag) ${list.length === 1 ? list[0]!.label : `${list.length} GTM workspaces`} ${synced}${pending ? ` $(cloud-upload) ${pending}` : ''}`;
+    statusBar.tooltip = list
+      .map((controller) => {
+        const at = syncedAt(controller);
+        const auto = controller.autoPull.active ? 'auto-pull on' : 'auto-pull off';
+        return `${controller.label}: last synced with GTM ${at ? formatAgo(now - at) : 'never'} (${auto})`;
+      })
+      .join('\n');
     statusBar.show();
   };
 
   const addMirror = async (root: string) => {
     if (controllers.has(root) || !(await hasState(root))) return;
     try {
-      const controller = await MirrorController.create(root, diagnostics, updateStatusBar);
+      const controller = await MirrorController.create(root, { api, output, diagnostics, autoPull: autoPullSettings(), onDidChange: updateStatusBar });
       controllers.set(root, controller);
       await controller.refresh();
     } catch (error: unknown) {
@@ -65,6 +103,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
     diagnostics,
     statusBar,
     vscode.window.registerFileDecorationProvider(decorations),
+    vscode.window.onDidChangeWindowState((state) => {
+      if (!state.focused) return;
+      for (const controller of controllers.values()) if (controller.autoPull.active) void controller.autoPull.checkIfStale(FOCUS_RECHECK_MS);
+    }),
+    vscode.workspace.onDidSaveTextDocument((doc) => {
+      // A whole file whose remote update waited for this save: merge it now.
+      for (const controller of controllers.values()) {
+        const rel = path.relative(controller.root, doc.uri.fsPath).split(path.sep).join('/');
+        if (controller.state?.deferred.includes(rel)) void controller.autoPull.check();
+      }
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration('gsCode.autoPull')) return;
+      const settings = autoPullSettings();
+      controllers.forEach((controller) => controller.applySettings(settings));
+      updateStatusBar();
+    }),
+    (() => {
+      const ticker = setInterval(updateStatusBar, STATUS_TICK_MS);
+      return { dispose: () => clearInterval(ticker) };
+    })(),
     vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
       event.removed.forEach((folder) => removeMirror(folder.uri.fsPath));
       for (const folder of event.added) await addMirror(folder.uri.fsPath);

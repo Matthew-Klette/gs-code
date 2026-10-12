@@ -53,7 +53,7 @@ describe('review regressions', () => {
     await pullWorkspace(root, gtm, await readState(root));
     const original = await json('.gtm/base/tags/GA4 - purchase.json');
     await put('tags/GA4 - purchase.json', { ...original, notes: 'mine' });
-    await expect(pushWorkspace(root, gtm, await readState(root))).rejects.toThrow(/changed in GTM/);
+    await expect(pushWorkspace(root, gtm, await readState(root))).rejects.toThrow(/GA4 - purchase: changed locally and in GTM/);
     expect(gtm.find('tag', 'GA4 - purchase')?.notes).toBe('colleague');
   });
 

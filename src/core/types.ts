@@ -57,6 +57,27 @@ export interface CreateVersionResult {
   readonly syncStatus?: { mergeConflict?: boolean; syncError?: boolean };
 }
 
+/** One side of a GTM merge conflict: `{ changeStatus, tag | trigger | variable | … }`. */
+export type ApiChange = Record<string, unknown> & { changeStatus?: string };
+
+/** An entity changed both in this workspace and in a newer container version. */
+export interface ApiMergeConflict {
+  readonly entityInWorkspace?: ApiChange;
+  readonly entityInBaseVersion?: ApiChange;
+}
+
+/** `workspaces.getStatus`: what the workspace changed relative to its base version. */
+export interface WorkspaceStatus {
+  readonly workspaceChange: readonly ApiChange[];
+  readonly mergeConflict: readonly ApiMergeConflict[];
+}
+
+export interface SyncResult {
+  readonly mergeConflict: boolean;
+  readonly syncError: boolean;
+  readonly conflicts: readonly ApiMergeConflict[];
+}
+
 export class GtmError extends Error {
   constructor(
     message: string,
@@ -65,6 +86,14 @@ export class GtmError extends Error {
   ) {
     super(message);
     this.name = 'GtmError';
+  }
+}
+
+/** Not signed in, or the sign-in expired. Retrying will not help; the user has to sign in again. */
+export class AuthError extends GtmError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthError';
   }
 }
 

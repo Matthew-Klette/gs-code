@@ -1,7 +1,7 @@
 {
   "name": "gs-code",
   "displayName": "GS Code",
-  "description": "GS Code (Google Studio Code): edit an entire Google Tag Manager workspace as files in VS Code. Pull, diff, push, version and publish.",
+  "description": "Edit an entire Google Tag Manager workspace as files in VS Code. Pull, diff, push, version and publish.",
   "version": "0.1.0",
   "publisher": "matthew-klette",
   "license": "MIT",
@@ -57,7 +57,7 @@
       },
       {
         "command": "gsCode.pull",
-        "title": "Pull",
+        "title": "Pull (sync to latest version)",
         "category": "GS Code",
         "icon": "$(cloud-download)"
       },
@@ -105,6 +105,16 @@
       {
         "command": "gsCode.resolveTheirs",
         "title": "Resolve Conflict: Take Theirs",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.gtmKeepWorkspace",
+        "title": "Resolve GTM Merge Conflict: Keep Workspace Version",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.gtmTakeLatest",
+        "title": "Resolve GTM Merge Conflict: Take Latest Version",
         "category": "GS Code"
       }
     ],
@@ -159,6 +169,14 @@
         {
           "command": "gsCode.resolveTheirs",
           "when": "scmProvider == gtm && scmResourceGroup == conflicts"
+        },
+        {
+          "command": "gsCode.gtmKeepWorkspace",
+          "when": "scmProvider == gtm && scmResourceGroup == gtmConflicts"
+        },
+        {
+          "command": "gsCode.gtmTakeLatest",
+          "when": "scmProvider == gtm && scmResourceGroup == gtmConflicts"
         }
       ],
       "commandPalette": [
@@ -177,6 +195,14 @@
         {
           "command": "gsCode.publish",
           "when": "config.gsCode.allowPublish"
+        },
+        {
+          "command": "gsCode.gtmKeepWorkspace",
+          "when": "false"
+        },
+        {
+          "command": "gsCode.gtmTakeLatest",
+          "when": "false"
         }
       ]
     },
@@ -204,6 +230,17 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Request the `tagmanager.publish` OAuth scope at sign-in and enable **Create Version and Publish**. Set to `false` and sign in again for a token that cannot publish at all."
+        },
+        "gsCode.autoPull.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Keep mirrors current automatically: check GTM on an interval, when the window gets focus and when a mirror opens. A check is 2 API requests; the full pull only runs when something changed. Unpushed and unsaved local edits are never overwritten."
+        },
+        "gsCode.autoPull.intervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 15,
+          "markdownDescription": "Seconds between background checks for GTM changes (minimum 15). The GTM API allows 25 requests per 100 seconds per Google Cloud project; at 60 s a check uses about 3."
         }
       }
     }

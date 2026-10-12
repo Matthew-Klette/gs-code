@@ -9,8 +9,12 @@ import {
   type BulkEntity,
   type ContainerInfo,
   type CreateVersionResult,
+  type ApiChange,
+  type ApiMergeConflict,
   type RemoteSnapshot,
+  type SyncResult,
   type WorkspaceInfo,
+  type WorkspaceStatus,
   type WorkspaceRef,
 } from './types';
 
@@ -29,6 +33,13 @@ export interface GtmApi {
   listWorkspaces(accountId: string, containerId: string): Promise<WorkspaceInfo[]>;
   createWorkspace(accountId: string, containerId: string, name: string, description?: string): Promise<WorkspaceInfo>;
   getWorkspace(ref: WorkspaceRef): Promise<WorkspaceInfo>;
+  /** One cheap call that changes whenever any entity in the workspace changes. */
+  getWorkspaceStatus(ref: WorkspaceRef): Promise<WorkspaceStatus>;
+  /** Id of the newest container version (published or not), if any. */
+  latestVersionId(accountId: string, containerId: string): Promise<string | undefined>;
+  /** Bring the workspace up to the latest container version. */
+  syncWorkspace(ref: WorkspaceRef): Promise<SyncResult>;
+  resolveConflict(ref: WorkspaceRef, entity: ApiChange, fingerprint?: string): Promise<void>;
   fetchSnapshot(ref: WorkspaceRef, usageContext?: readonly string[]): Promise<RemoteSnapshot>;
   createEntity(ref: WorkspaceRef, kind: EntityKind, body: ApiEntity): Promise<ApiEntity>;
   updateEntity(ref: WorkspaceRef, kind: EntityKind, id: string, body: ApiEntity, fingerprint?: string): Promise<ApiEntity>;
@@ -95,6 +106,39 @@ export class HttpGtmApi implements GtmApi {
 
   async getWorkspace(ref: WorkspaceRef): Promise<WorkspaceInfo> {
     return toWorkspaceInfo(await this.request('GET', workspacePath(ref)));
+  }
+
+  async getWorkspaceStatus(ref: WorkspaceRef): Promise<WorkspaceStatus> {
+    const response = await this.request('GET', `${workspacePath(ref)}/status`);
+    return {
+      workspaceChange: Array.isArray(response.workspaceChange) ? (response.workspaceChange as ApiChange[]) : [],
+      mergeConflict: Array.isArray(response.mergeConflict) ? (response.mergeConflict as ApiMergeConflict[]) : [],
+    };
+  }
+
+  async latestVersionId(accountId: string, containerId: string): Promise<string | undefined> {
+    try {
+      const header = await this.request('GET', `accounts/${accountId}/containers/${containerId}/version_headers:latest`);
+      return typeof header.containerVersionId === 'string' ? header.containerVersionId : undefined;
+    } catch (error: unknown) {
+      if (error instanceof GtmError && error.status === 404) return undefined; // container has no versions yet
+      throw error;
+    }
+  }
+
+  async syncWorkspace(ref: WorkspaceRef): Promise<SyncResult> {
+    const response = await this.request('POST', `${workspacePath(ref)}:sync`);
+    const status = (response.syncStatus ?? {}) as { mergeConflict?: boolean; syncError?: boolean };
+    return {
+      mergeConflict: status.mergeConflict === true,
+      syncError: status.syncError === true,
+      conflicts: Array.isArray(response.mergeConflict) ? (response.mergeConflict as ApiMergeConflict[]) : [],
+    };
+  }
+
+  async resolveConflict(ref: WorkspaceRef, entity: ApiChange, fingerprint?: string): Promise<void> {
+    const query = fingerprint ? `?fingerprint=${encodeURIComponent(fingerprint)}` : '';
+    await this.request('POST', `${workspacePath(ref)}:resolve_conflict${query}`, entity);
   }
 
   async fetchSnapshot(ref: WorkspaceRef, usageContext: readonly string[] = []): Promise<RemoteSnapshot> {

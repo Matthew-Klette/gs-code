@@ -3,16 +3,16 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import type { GtmApi } from '../core/api';
 import { parseClientSecretJson, signIn, type CredentialStore } from '../core/auth/oauth';
-import { describeChanges, describePull } from '../core/format';
+import { describeChanges, describeConflicts, describePull } from '../core/format';
 import { countChanges, isEmpty } from '../core/mirror/diff';
 import { safeFileName } from '../core/mirror/layout';
 import { readState } from '../core/mirror/state';
 import { assertNotProtected, createVersion } from '../core/ops/publish';
-import { pullWorkspace } from '../core/ops/pull';
 import { pushWorkspace, type PushStrategy } from '../core/ops/push';
+import { refreshMirror, resolveGtmConflict, type GtmResolution, type RefreshResult } from '../core/ops/sync';
 import { discardChanges, initMirror, resolveConflict } from '../core/ops/workspace';
 import type { ContainerInfo, WorkspaceInfo } from '../core/types';
-import type { MirrorController, ResourceState } from './mirror';
+import { dirtyOverlay, type MirrorController, type ResourceState } from './mirror';
 
 const MAX_PREVIEW_LINES = 20;
 
@@ -98,6 +98,8 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
     register('discard', (...states) => discard(deps, states)),
     register('resolveMine', (...states) => resolve(deps, states, 'mine')),
     register('resolveTheirs', (...states) => resolve(deps, states, 'theirs')),
+    register('gtmKeepWorkspace', (...states) => resolveGtm(deps, states, 'workspace')),
+    register('gtmTakeLatest', (...states) => resolveGtm(deps, states, 'latest')),
   ];
 }
 
@@ -118,7 +120,7 @@ async function doSignIn(deps: CommandDeps): Promise<boolean> {
   if (!(await deps.store.loadClient())) {
     const choice = await vscode.window.showWarningMessage('Configure your OAuth client first (a Desktop app client from Google Cloud Console).', 'Configure', 'How?');
     if (choice === 'Configure') await configureClient(deps);
-    if (choice === 'How?') await vscode.env.openExternal(vscode.Uri.parse('https://github.com/Matthew-Klette/gs-code#1-create-a-google-oauth-client-one-time-2-minutes'));
+    if (choice === 'How?') await vscode.env.openExternal(vscode.Uri.parse('https://github.com/Matthew-Klette/gs-code#getting-started'));
     return false;
   }
   const done = await run(deps, 'Signing in to Google Tag Manager (finish in your browser)…', async () => {
@@ -173,23 +175,48 @@ async function pickWorkspace(deps: CommandDeps, container: ContainerInfo): Promi
   return run(deps, `Creating workspace "${name}"…`, () => deps.api.createWorkspace(container.accountId, container.containerId, name.trim()));
 }
 
+/** Sync the workspace to the latest version if needed and pull (only when GTM changed, unless forced). */
+function refreshNow(deps: CommandDeps, controller: MirrorController, force: boolean, report?: (message: string) => void): Promise<RefreshResult> {
+  return controller.exclusive(async () =>
+    refreshMirror(controller.root, deps.api, await readState(controller.root), { force, overlay: dirtyOverlay(controller.root), onProgress: report }),
+  );
+}
+
 async function pull(deps: CommandDeps, arg?: unknown): Promise<void> {
   const controller = await pickController(deps, arg);
   if (!controller?.state) return;
-  const result = await run(deps, `Pulling ${controller.label}…`, () =>
-    controller.exclusive(async () => pullWorkspace(controller.root, deps.api, await readState(controller.root))),
-  );
-  await controller.refresh();
+  const result = await run(deps, `Pulling ${controller.label}…`, (report) => refreshNow(deps, controller, true, report));
   if (!result) return;
-  const summary = describePull(result);
-  if (result.conflicts.length) void vscode.window.showWarningMessage(`Pull: ${summary}. Resolve conflicts in the Source Control view.`);
-  else void vscode.window.showInformationMessage(`Pull: ${summary}.`);
+  await controller.afterRefresh(result, 'command');
+  const summary = result.pull ? describePull(result.pull) : 'already up to date';
+  const blocked = describeConflicts(result.state);
+  if (blocked.length) void vscode.window.showWarningMessage(`Pull: ${summary}. Resolve conflicts in the Source Control view.`);
+  else void vscode.window.showInformationMessage(`Pull: ${summary}${result.syncedTo ? ` (workspace synced to version ${result.syncedTo})` : ''}.`);
+}
+
+/** Pull before Push / Create Version; returns false (and says why) if conflicts must be settled first. */
+async function refreshBeforeWrite(deps: CommandDeps, controller: MirrorController, action: string): Promise<boolean> {
+  const result = await run(deps, `Checking GTM for changes before ${action}…`, (report) => refreshNow(deps, controller, false, report));
+  if (!result) return false;
+  await controller.afterRefresh(result, 'command');
+  const blocked = describeConflicts(result.state);
+  if (!blocked.length) return true;
+  blocked.forEach((line) => deps.output.appendLine(line));
+  void vscode.window.showWarningMessage(`GTM has changes that conflict with yours. Resolve them in Source Control, then ${action} again.`, 'Show Details').then((choice) => {
+    if (choice) deps.output.show();
+  });
+  return false;
 }
 
 async function push(deps: CommandDeps, arg?: unknown): Promise<void> {
   const controller = await pickController(deps, arg);
   if (!controller) return;
   await controller.refresh();
+  if (controller.status && isEmpty(controller.status.changes)) {
+    void vscode.window.showInformationMessage('Nothing to push.');
+    return;
+  }
+  if (!(await refreshBeforeWrite(deps, controller, 'Push'))) return;
   const { state, status } = controller;
   if (!state || !status) return;
   if (isEmpty(status.changes)) {
@@ -205,7 +232,7 @@ async function push(deps: CommandDeps, arg?: unknown): Promise<void> {
   if (ok !== 'Push') return;
   const result = await run(deps, `Pushing to ${controller.label}…`, (report) =>
     controller.exclusive(async () =>
-      pushWorkspace(controller.root, deps.api, await readState(controller.root), { strategy: config().pushStrategy, onProgress: report }),
+      pushWorkspace(controller.root, deps.api, await readState(controller.root), { strategy: config().pushStrategy, onProgress: report, overlay: dirtyOverlay(controller.root) }),
     ),
   );
   await controller.refresh();
@@ -229,6 +256,7 @@ async function version(deps: CommandDeps, arg: unknown, publish: boolean): Promi
     void vscode.window.showErrorMessage('Publishing is disabled (gsCode.allowPublish is false).');
     return;
   }
+  if (!(await refreshBeforeWrite(deps, controller, publish ? 'publishing' : 'creating a version'))) return;
   const name = await vscode.window.showInputBox({ prompt: 'Version name', value: `${state.workspace.name} (${new Date().toISOString().slice(0, 10)})` });
   if (name === undefined) return;
   const notes = await vscode.window.showInputBox({ prompt: 'Version notes (optional)' });
@@ -249,6 +277,7 @@ async function version(deps: CommandDeps, arg: unknown, publish: boolean): Promi
     ),
   );
   await controller.refresh();
+  if (result) void controller.autoPull.check();
   if (result) void vscode.window.showInformationMessage(`Version ${result.versionId} ${result.published ? 'published' : 'created'}. Now editing "${result.state.workspace.name}".`);
 }
 
@@ -278,6 +307,21 @@ async function resolve(deps: CommandDeps, args: unknown[], resolution: 'mine' | 
     await run(deps, `Resolving ${base}…`, () =>
       controller.exclusive(async () => resolveConflict(controller.root, await readState(controller.root), base, resolution)),
     );
+  }
+  await controller.refresh();
+}
+
+async function resolveGtm(deps: CommandDeps, args: unknown[], resolution: GtmResolution): Promise<void> {
+  const states = statesFrom(args).filter((state) => state.gtmConflict);
+  const controller = await pickController(deps, states[0]?.resourceUri);
+  if (!controller?.state || states.length === 0) return;
+  for (const base of new Set(states.map((state) => state.base))) {
+    const result = await run(deps, `Resolving GTM merge conflict ${base}…`, () =>
+      controller.exclusive(async () =>
+        resolveGtmConflict(controller.root, deps.api, await readState(controller.root), base, resolution, { overlay: dirtyOverlay(controller.root) }),
+      ),
+    );
+    if (result) await controller.afterRefresh(result, 'command');
   }
   await controller.refresh();
 }

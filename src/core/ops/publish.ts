@@ -45,6 +45,9 @@ export async function createVersion(root: string, api: GtmApi, state: MirrorStat
   assertNotProtected(state, request.protectedContainers);
   const status = await workingStatus(root, state);
   if (state.conflicts.length) throw new GtmError('Resolve conflicts before creating a version.');
+  if (state.gtmConflicts.length) {
+    throw new GtmError(`Resolve the GTM merge conflicts first (Keep Workspace / Take Latest): ${state.gtmConflicts.map((item) => item.base).join(', ')}`);
+  }
   if (!isEmpty(status.changes)) {
     throw new GtmError(`You have ${countChanges(status.changes)} unpushed change(s). Push or discard them before creating a version.`);
   }
@@ -58,7 +61,7 @@ export async function createVersion(root: string, api: GtmApi, state: MirrorStat
   const versionId = version.containerVersionId;
   let nextState: MirrorState;
   try {
-    nextState = await repointWorkspace(root, api, state, version.newWorkspacePath);
+    nextState = await repointWorkspace(root, api, state, version.newWorkspacePath, versionId);
   } catch (error: unknown) {
     throw new GtmError(
       `Version ${versionId} was created and GTM replaced the workspace, but switching this folder to the new workspace failed: ${message(error)}. ` +
@@ -82,10 +85,11 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function repointWorkspace(root: string, api: GtmApi, state: MirrorState, newWorkspacePath?: string): Promise<MirrorState> {
+async function repointWorkspace(root: string, api: GtmApi, state: MirrorState, newWorkspacePath: string | undefined, versionId: string): Promise<MirrorState> {
   if (!newWorkspacePath) throw new GtmError('GTM did not say which workspace replaced the old one.');
   const workspace = await api.getWorkspace(parseWorkspacePath(newWorkspacePath));
-  const moved: MirrorState = { ...state, workspace };
+  // The new workspace starts from the version just created; its status is unknown, so the next check pulls.
+  const moved: MirrorState = { ...state, workspace, remote: { versionId }, gtmConflicts: [] };
   await writeState(root, moved);
   const snapshot = await api.fetchSnapshot(workspace, state.container.usageContext);
   return (await applySnapshot(root, moved, snapshot)).state;

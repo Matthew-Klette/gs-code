@@ -15,6 +15,26 @@ export interface FolderEntry {
   readonly fingerprint?: string;
 }
 
+/** What the mirror last saw of GTM, so a poll can tell "nothing changed" with two cheap calls. */
+export interface RemoteMark {
+  /** Hash of `workspaces.getStatus` taken just before the last full pull. */
+  readonly status?: string;
+  /** Container version the workspace was last synced to. */
+  readonly versionId?: string;
+}
+
+/** A GTM merge conflict: the entity changed in this workspace and in a newer container version. */
+export interface GtmConflict {
+  readonly kind: EntityKind;
+  readonly id: string;
+  readonly name?: string;
+  /** Mirror path of the entity. */
+  readonly base: string;
+  /** `changeStatus` on each side (`updated`, `deleted`, …). */
+  readonly workspaceChange?: string;
+  readonly latestChange?: string;
+}
+
 export interface MirrorState {
   readonly version: 1;
   readonly container: ContainerInfo;
@@ -30,10 +50,15 @@ export interface MirrorState {
   readonly conflictFingerprints: Readonly<Record<string, string>>;
   /** Built-in variable type → display name, for `{{…}}` validation. */
   readonly builtInNames: Readonly<Record<string, string>>;
+  readonly remote?: RemoteMark;
+  /** Unresolved GTM merge conflicts after syncing to the latest version. Push and versioning stop until they are settled. */
+  readonly gtmConflicts: readonly GtmConflict[];
+  /** Whole files (folders.json, built-in-variables.json) whose remote update waits until their open editor is saved. */
+  readonly deferred: readonly string[];
 }
 
 export function emptyState(container: ContainerInfo, workspace: WorkspaceInfo): MirrorState {
-  return { version: 1, container, workspace, entities: {}, folders: {}, conflicts: [], conflictFingerprints: {}, builtInNames: {} };
+  return { version: 1, container, workspace, entities: {}, folders: {}, conflicts: [], conflictFingerprints: {}, builtInNames: {}, gtmConflicts: [], deferred: [] };
 }
 
 export function entityKey(kind: EntityKind, id: string): string {
@@ -59,6 +84,8 @@ export async function readState(root: string): Promise<MirrorState> {
     conflicts: parsed.conflicts ?? [],
     conflictFingerprints: parsed.conflictFingerprints ?? {},
     builtInNames: parsed.builtInNames ?? {},
+    gtmConflicts: parsed.gtmConflicts ?? [],
+    deferred: parsed.deferred ?? [],
   };
 }
 
