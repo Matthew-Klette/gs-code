@@ -7,7 +7,7 @@ import { describeChanges, describeConflicts, describePull } from '../core/format
 import { changeSignature, countChanges, isEmpty } from '../core/mirror/diff';
 import { safeFileName } from '../core/mirror/layout';
 import { readState } from '../core/mirror/state';
-import { assertNotProtected, createVersion } from '../core/ops/publish';
+import { assertNotProtected, createVersion, publishVersion } from '../core/ops/publish';
 import { pushWorkspace, type PushStrategy } from '../core/ops/push';
 import { refreshMirror, resolveGtmConflict, switchWorkspace, type GtmResolution, type RefreshResult } from '../core/ops/sync';
 import { discardChanges, initMirror, resolveConflict, tidyFileNames } from '../core/ops/workspace';
@@ -101,6 +101,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
     register('pull', (arg) => pull(deps, arg)),
     register('switchWorkspace', (arg) => switchTo(deps, arg)),
     register('adoptFolder', () => adoptFolder(deps)),
+    register('versions', (arg) => versions(deps, arg)),
     register('tidy', async (arg) => {
       const controller = await pickController(deps, arg);
       if (!controller?.state) return;
@@ -234,6 +235,37 @@ async function openWorkspace(deps: CommandDeps): Promise<void> {
     vscode.workspace.updateWorkspaceFolders(vscode.workspace.workspaceFolders?.length ?? 0, 0, { uri: vscode.Uri.file(root) });
     await deps.addMirror(root);
   }
+}
+
+/** Container versions, with the live one marked; publishing an older one is a deliberate rollback. */
+async function versions(deps: CommandDeps, arg?: unknown): Promise<void> {
+  const controller = await pickController(deps, arg);
+  const state = controller?.state;
+  if (!state) return;
+  const { accountId, containerId, publicId } = state.container;
+  const loaded = await run(deps, 'Loading versions…', async () =>
+    Promise.all([deps.api.listVersions(accountId, containerId), deps.api.liveVersionId(accountId, containerId)]),
+  );
+  if (!loaded) return;
+  const [list, live] = loaded;
+  const picked = await vscode.window.showQuickPick(
+    [...list].reverse().map((version) => ({ label: `${version.versionId === live ? '$(broadcast) ' : ''}${version.versionId}`, description: version.name, detail: version.versionId === live ? 'live' : undefined, version })),
+    { placeHolder: `${publicId} versions (newest first)` },
+  );
+  if (!picked || picked.version.versionId === live) return;
+  const { protectedContainers, allowPublish } = config();
+  if (!allowPublish) return void vscode.window.showErrorMessage('Publishing is disabled (gsCode.allowPublish is false).');
+  const older = live !== undefined && Number(picked.version.versionId) < Number(live);
+  const typed = await vscode.window.showInputBox({
+    prompt: `${older ? `ROLL BACK ${publicId} from version ${live} to ${picked.version.versionId}` : `Publish version ${picked.version.versionId}`}. Type ${publicId} to confirm.`,
+    validateInput: (value) => (value.trim().toUpperCase() === publicId.toUpperCase() ? undefined : `Type ${publicId}`),
+  });
+  if (!typed) return;
+  const done = await run(deps, `Publishing version ${picked.version.versionId}…`, async () => {
+    await publishVersion(deps.api, state, picked.version.versionId, protectedContainers, { rollback: older });
+    return true;
+  });
+  if (done) void vscode.window.showInformationMessage(`Version ${picked.version.versionId} is now live on ${publicId}.`);
 }
 
 /** A folder cloned from git (a teammate's mirror) gets its own link to a workspace; the files stay as they are. */

@@ -10,6 +10,8 @@ import {
   type ApiMergeConflict,
   type BulkEntity,
   type ContainerInfo,
+  type EnvironmentInfo,
+  type VersionHeader,
   type CreateVersionResult,
   type RemoteSnapshot,
   type SyncResult,
@@ -147,6 +149,28 @@ export class FakeGtm implements GtmApi {
   async liveVersionId(): Promise<string | undefined> {
     this.calls.push('liveVersion');
     return [...this.versions].reverse().find((version) => version.published)?.id;
+  }
+
+  environments: EnvironmentInfo[] = [];
+  compilerError = false;
+
+  async listVersions(): Promise<VersionHeader[]> {
+    this.calls.push('listVersions');
+    return this.versions.map((version) => ({ versionId: version.id, name: version.name, deleted: false, counts: {} }));
+  }
+
+  async listEnvironments(): Promise<EnvironmentInfo[]> {
+    this.calls.push('listEnvironments');
+    return structuredClone(this.environments);
+  }
+
+  async quickPreview(ref: WorkspaceRef): Promise<{ compilerError: boolean; mergeConflict: boolean }> {
+    this.assertWorkspace(ref);
+    this.calls.push('quickPreview');
+    if (!this.environments.some((env) => env.type === 'workspace' && env.workspaceId === this.workspace.workspaceId)) {
+      this.environments = [...this.environments, { environmentId: '9', name: 'Workspace preview', type: 'workspace', authorizationCode: 'auth-preview', workspaceId: this.workspace.workspaceId }];
+    }
+    return { compilerError: this.compilerError, mergeConflict: this.mergeConflicts.length > 0 };
   }
 
   async latestVersionId(): Promise<string | undefined> {

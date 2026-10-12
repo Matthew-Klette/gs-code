@@ -72,6 +72,24 @@ export interface WorkspaceStatus {
   readonly mergeConflict: readonly ApiMergeConflict[];
 }
 
+export interface VersionHeader {
+  readonly versionId: string;
+  readonly name?: string;
+  readonly deleted: boolean;
+  readonly counts: Readonly<Record<string, number>>;
+}
+
+export interface EnvironmentInfo {
+  readonly environmentId: string;
+  readonly name: string;
+  /** user | live | latest | workspace */
+  readonly type: string;
+  readonly authorizationCode?: string;
+  readonly workspaceId?: string;
+  readonly containerVersionId?: string;
+  readonly url?: string;
+}
+
 export interface SyncResult {
   readonly mergeConflict: boolean;
   readonly syncError: boolean;

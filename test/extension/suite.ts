@@ -25,7 +25,7 @@ export async function run(): Promise<void> {
   log('extension activates from workspaceContains:.gtm/state.json');
 
   const commands = await vscode.commands.getCommands(true);
-  const expected = ['configureClient', 'signIn', 'signOut', 'open', 'pull', 'push', 'refresh', 'createVersion', 'publish', 'openInGtm', 'discard', 'resolveMine', 'resolveTheirs', 'gtmKeepWorkspace', 'gtmTakeLatest', 'importCliSignIn', 'switchWorkspace', 'removeClient', 'adoptFolder', 'tidy'];
+  const expected = ['configureClient', 'signIn', 'signOut', 'open', 'pull', 'push', 'refresh', 'createVersion', 'publish', 'openInGtm', 'discard', 'resolveMine', 'resolveTheirs', 'gtmKeepWorkspace', 'gtmTakeLatest', 'importCliSignIn', 'switchWorkspace', 'removeClient', 'adoptFolder', 'tidy', 'versions'];
   for (const id of expected) assert.ok(commands.includes(`gsCode.${id}`), `command gsCode.${id} registered`);
   log(`all ${expected.length} commands registered`);
 

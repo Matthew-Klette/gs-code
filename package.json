@@ -163,6 +163,11 @@
         "command": "gsCode.tidy",
         "title": "Rename Files to Match GTM",
         "category": "GS Code"
+      },
+      {
+        "command": "gsCode.versions",
+        "title": "Versions / Roll Back…",
+        "category": "GS Code"
       }
     ],
     "menus": {
@@ -206,6 +211,11 @@
           "command": "gsCode.discard",
           "when": "scmProvider == gtm",
           "group": "2_misc@2"
+        },
+        {
+          "command": "gsCode.versions",
+          "when": "scmProvider == gtm",
+          "group": "1_publish@3"
         }
       ],
       "scm/resourceState/context": [

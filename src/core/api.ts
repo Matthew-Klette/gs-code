@@ -10,6 +10,8 @@ import {
   type BulkEntity,
   type ContainerInfo,
   type CreateVersionResult,
+  type EnvironmentInfo,
+  type VersionHeader,
   type ApiChange,
   type ApiMergeConflict,
   type RemoteSnapshot,
@@ -57,6 +59,10 @@ export interface GtmApi {
   disableBuiltIns(ref: WorkspaceRef, types: readonly string[]): Promise<void>;
   createVersion(ref: WorkspaceRef, name: string, notes: string): Promise<CreateVersionResult>;
   publishVersion(accountId: string, containerId: string, versionId: string): Promise<{ compilerError: boolean }>;
+  listVersions(accountId: string, containerId: string): Promise<VersionHeader[]>;
+  listEnvironments(accountId: string, containerId: string): Promise<EnvironmentInfo[]>;
+  /** Compile the workspace without creating a version: GTM's own check for errors. */
+  quickPreview(ref: WorkspaceRef): Promise<{ compilerError: boolean; mergeConflict: boolean }>;
 }
 
 export interface HttpApiOptions {
@@ -235,6 +241,35 @@ export class HttpGtmApi implements GtmApi {
   async publishVersion(accountId: string, containerId: string, versionId: string): Promise<{ compilerError: boolean }> {
     const response = await this.request('POST', `accounts/${accountId}/containers/${containerId}/versions/${versionId}:publish`);
     return { compilerError: response.compilerError === true };
+  }
+
+  async listVersions(accountId: string, containerId: string): Promise<VersionHeader[]> {
+    const items = await this.listAll(`accounts/${accountId}/containers/${containerId}/version_headers?includeDeleted=false`, 'containerVersionHeader');
+    return items.map((item) => ({
+      versionId: String(item.containerVersionId),
+      name: typeof item.name === 'string' ? item.name : undefined,
+      deleted: item.deleted === true,
+      counts: Object.fromEntries(Object.entries(item).filter(([key]) => key.startsWith('num')).map(([key, value]) => [key.slice(3), Number(value)])),
+    }));
+  }
+
+  async listEnvironments(accountId: string, containerId: string): Promise<EnvironmentInfo[]> {
+    const items = await this.listAll(`accounts/${accountId}/containers/${containerId}/environments`, 'environment');
+    return items.map((item) => ({
+      environmentId: String(item.environmentId),
+      name: String(item.name ?? ''),
+      type: String(item.type ?? ''),
+      authorizationCode: typeof item.authorizationCode === 'string' ? item.authorizationCode : undefined,
+      workspaceId: typeof item.workspaceId === 'string' ? item.workspaceId : undefined,
+      containerVersionId: typeof item.containerVersionId === 'string' ? item.containerVersionId : undefined,
+      url: typeof item.url === 'string' ? item.url : undefined,
+    }));
+  }
+
+  async quickPreview(ref: WorkspaceRef): Promise<{ compilerError: boolean; mergeConflict: boolean }> {
+    const response = await this.request('POST', `${workspacePath(ref)}:quick_preview`);
+    const sync = (response.syncStatus ?? {}) as { mergeConflict?: boolean };
+    return { compilerError: response.compilerError === true, mergeConflict: sync.mergeConflict === true };
   }
 
   /** `undefined` means the kind is not available on this container (not "empty"). */

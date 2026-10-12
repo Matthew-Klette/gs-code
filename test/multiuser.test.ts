@@ -198,3 +198,15 @@ describe('a teammate without permission to update the workspace', () => {
     expect(result.behind).toBe('1');
   });
 });
+
+describe('versions and rollback', () => {
+  it('rolls back to an older version only on purpose', async () => {
+    const { publishVersion } = await import('../src/core/ops/publish');
+    const v1 = gtm.publishElsewhere('one', (contents) => contents);
+    const v2 = gtm.publishElsewhere('two', (contents) => contents);
+    await expect(publishVersion(gtm, await state(), v1, [])).rejects.toThrow(/roll it back/);
+    await publishVersion(gtm, await state(), v1, [], { rollback: true });
+    expect(gtm.calls).toContain(`publish ${v1}`);
+    expect(v2).toBe('2');
+  });
+});

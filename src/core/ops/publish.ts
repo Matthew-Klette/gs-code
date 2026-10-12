@@ -103,20 +103,29 @@ async function createVersionLocked(root: string, api: GtmApi, state: MirrorState
   return { versionId, published: request.publish, state: nextState };
 }
 
-/** Publish an existing container version (e.g. one whose publish failed), with the same guards. */
-export async function publishVersion(api: GtmApi, state: MirrorState, versionId: string, protectedContainers: readonly string[]): Promise<void> {
+/**
+ * Publish an existing container version (one whose publish failed, or an older one to roll back to),
+ * with the same guards. Going back to an older version than the live one needs `rollback: true`.
+ */
+export async function publishVersion(
+  api: GtmApi,
+  state: MirrorState,
+  versionId: string,
+  protectedContainers: readonly string[],
+  options: { readonly rollback?: boolean } = {},
+): Promise<void> {
   assertNotProtected(state, protectedContainers);
-  const error = await publishOrError(api, state, versionId, () => undefined);
+  const error = await publishOrError(api, state, versionId, () => undefined, options.rollback === true);
   if (error) throw new GtmError(`Version ${versionId} was NOT published: ${error}`);
 }
 
-async function publishOrError(api: GtmApi, state: MirrorState, versionId: string, progress: (message: string) => void): Promise<string | undefined> {
+async function publishOrError(api: GtmApi, state: MirrorState, versionId: string, progress: (message: string) => void, rollback = false): Promise<string | undefined> {
   progress(`Publishing version ${versionId}…`);
   try {
-    // Never roll the site back: if a newer version went live in the meantime, stop.
+    // Never roll the site back by accident: if a newer version is live, stop unless that is the point.
     const live = await api.liveVersionId(state.container.accountId, state.container.containerId);
-    if (live && Number(live) > Number(versionId)) {
-      return `version ${live} is newer and already live; publishing ${versionId} would roll it back`;
+    if (!rollback && live && Number(live) > Number(versionId)) {
+      return `version ${live} is newer and already live; publishing ${versionId} would roll it back (use rollback to do that on purpose)`;
     }
     const published = await api.publishVersion(state.container.accountId, state.container.containerId, versionId);
     return published.compilerError ? 'GTM reported a compiler error' : undefined;

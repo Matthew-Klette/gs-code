@@ -42,7 +42,10 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode resolve <base> (--mine | --theirs) [--dir dir]
   gscode resolve-gtm <base> (--keep-workspace | --latest) [--dir dir]
   gscode version [dir] --name <name> [--notes <text>] [--publish --confirm <GTM-XXXX>]
-  gscode publish [dir] --version <id> --confirm <GTM-XXXX>     publish an existing version
+  gscode publish [dir] --version <id> --confirm <GTM-XXXX> [--rollback]
+                                     publish an existing version (--rollback: an older one, on purpose)
+  gscode versions [dir]              list container versions (* = live)
+  gscode environments [dir]          list environments (live, latest, workspace previews, your own)
 
 Protected containers (version/publish blocked): ~/.config/gs-code/config.json
 {"protectedContainers": ["GTM-XXXXXXX"]} or GSCODE_PROTECTED=GTM-A,GTM-B
@@ -272,7 +275,20 @@ async function cmdSwitch(root: string, values: { workspace?: string; new?: strin
   describeConflicts(result.state).forEach((line) => out(line));
 }
 
-async function cmdPublish(root: string, values: { version?: string; confirm?: string }) {
+async function cmdVersions(root: string) {
+  const { accountId, containerId } = (await readState(root)).container;
+  const [versions, live] = await Promise.all([api.listVersions(accountId, containerId), api.liveVersionId(accountId, containerId)]);
+  for (const version of [...versions].reverse()) out(`${version.versionId === live ? '*' : ' '} ${version.versionId}\t${version.name ?? ''}`);
+}
+
+async function cmdEnvironments(root: string) {
+  const { accountId, containerId } = (await readState(root)).container;
+  for (const env of await api.listEnvironments(accountId, containerId)) {
+    out(`env-${env.environmentId}\t${env.type}\t${env.name}${env.workspaceId ? `\tworkspace ${env.workspaceId}` : ''}${env.containerVersionId ? `\tversion ${env.containerVersionId}` : ''}`);
+  }
+}
+
+async function cmdPublish(root: string, values: { version?: string; confirm?: string; rollback?: boolean }) {
   if (!values.version) throw new GtmError('--version <id> is required.');
   const state = await readState(root);
   const protectedContainers = (await loadCliConfig()).protectedContainers ?? [];
@@ -280,7 +296,7 @@ async function cmdPublish(root: string, values: { version?: string; confirm?: st
   if (values.confirm?.toUpperCase() !== state.container.publicId.toUpperCase()) {
     throw new GtmError(`Publishing goes live. Repeat the container id: --confirm ${state.container.publicId}`);
   }
-  await publishVersion(api, state, values.version, protectedContainers);
+  await publishVersion(api, state, values.version, protectedContainers, { rollback: values.rollback === true });
   out(`Version ${values.version} published on ${state.container.publicId}.`);
 }
 
@@ -294,7 +310,7 @@ async function main(argv: string[]): Promise<void> {
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
       interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
-      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' },
+      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' }, rollback: { type: 'boolean' },
     },
   });
   const [command, ...rest] = positionals;
@@ -341,6 +357,8 @@ async function main(argv: string[]): Promise<void> {
     }
     case 'version': return cmdVersion(root, values);
     case 'publish': return cmdPublish(root, values);
+    case 'versions': return cmdVersions(root);
+    case 'environments': return cmdEnvironments(root);
     case 'switch': return cmdSwitch(root, { workspace: values.workspace, new: values.new });
     default: return out(HELP);
   }
