@@ -9,6 +9,8 @@ import { fileStampStore } from '../cli/fileStore';
 import { RateLimiter } from '../core/rateLimiter';
 import { autoPullConfig, GtmDecorations, MirrorController } from './mirror';
 import { SecretCredentialStore } from './secretStore';
+import { DebugPanel, debugSettings } from './debugPanel';
+import { Toolkit } from '../debugger/toolkit';
 
 /** Returned from activate() so integration tests can inspect state. */
 export interface GsCodeExtensionApi {
@@ -144,6 +146,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
     }),
     { dispose: () => controllers.forEach((controller) => controller.dispose()) },
   );
+
+  // ---- Debugger panel and agent tools (Copilot and other VS Code agents use the same live session)
+  const pickRoot = async (): Promise<string | undefined> => {
+    const list = [...controllers.values()];
+    if (list.length <= 1) return list[0]?.root;
+    const active = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const fromEditor = active ? list.find((controller) => active.startsWith(controller.root + path.sep)) : undefined;
+    if (fromEditor) return fromEditor.root;
+    const picked = await vscode.window.showQuickPick(list.map((controller) => ({ label: controller.label, root: controller.root })), { placeHolder: 'Debug which GTM workspace?' });
+    return picked?.root;
+  };
+  const toolkit = new Toolkit({
+    api,
+    defaultRoot: () => DebugPanel.activeRoot() ?? [...controllers.values()][0]?.root,
+    browser: () => debugSettings(context).browser,
+    settings: () => {
+      const settings = debugSettings(context);
+      return { sgtmHosts: settings.sgtmHosts, loaderPatterns: settings.loaderPatterns, dataLayerName: settings.dataLayerName };
+    },
+    sharedSession: () => DebugPanel.activeSession(),
+    onSession: (session) => {
+      const root = DebugPanel.activeRoot() ?? [...controllers.values()][0]?.root;
+      if (root) DebugPanel.show(context, api, root, output).adopt(session);
+    },
+  });
+  context.subscriptions.push(
+    vscode.commands.registerCommand('gsCode.debug', async () => {
+      const root = await pickRoot();
+      if (!root) return void vscode.window.showInformationMessage('Open a GTM workspace mirror first ("GS Code: Open Workspace…").');
+      DebugPanel.show(context, api, root, output);
+    }),
+    { dispose: () => void toolkit.activeSession?.stop() },
+  );
+  for (const tool of toolkit.definitions()) {
+    context.subscriptions.push(
+      vscode.lm.registerTool<Record<string, unknown>>(tool.name, {
+        prepareInvocation: (options) =>
+          tool.name === 'gtm_push'
+            ? { invocationMessage: 'Pushing to the GTM workspace', confirmationMessages: { title: 'Push to GTM?', message: 'Send the reviewed local changes to the GTM workspace (not live).' } }
+            : { invocationMessage: `GS Code: ${tool.name.replace(/_/g, ' ')}${typeof options.input.url === 'string' ? ` ${options.input.url}` : ''}` },
+        invoke: async (options) => {
+          try {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(await tool.run(options.input))]);
+          } catch (error: unknown) {
+            return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Error: ${error instanceof Error ? error.message : String(error)}`)]);
+          }
+        },
+      }),
+    );
+  }
 
   await scanFolders();
   return { controllers: () => [...controllers.values()] };

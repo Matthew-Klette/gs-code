@@ -15,6 +15,8 @@ export interface Hit {
   readonly id?: string;
   /** Sent to the server container (a first-party host) rather than to the vendor. */
   readonly firstParty: boolean;
+  /** Raw request body (first-party hits only), so the request can be replayed into sGTM preview. */
+  readonly body?: string;
   status?: number;
   responseBody?: string;
   setCookies?: readonly string[];
@@ -86,6 +88,7 @@ export function classifyHit(rawUrl: string, method: string, postData: string | u
     name: rule?.name?.(first, url),
     id: rule?.id?.(first, url),
     firstParty,
+    ...(firstParty && postData ? { body: postData.slice(0, 65_536) } : {}),
   };
 }
 

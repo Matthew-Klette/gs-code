@@ -141,13 +141,32 @@ export function probe(options: ProbeOptions): void {
     if (!Array.isArray(list) || (list as any).__gsCodeHooked) return list;
     Object.defineProperty(list, '__gsCodeHooked', { value: true });
     for (let i = 0; i < list.length; i++) record(list[i], Date.now(), ++seq, 'initial');
-    let inner: any = list.push;
+    // Every push function assigned so far, oldest first (native push, then each GTM container's).
+    // GTM saves the push it found (our wrapper) and calls it from its own, so a nested call must go
+    // to the function assigned before the caller, not back to the newest one.
+    const chain: any[] = [list.push];
+    let depth = 0;
     const wrapped = function (this: unknown) {
       const items = Array.prototype.slice.call(arguments);
+      const target = chain[Math.max(0, chain.length - 1 - depth)];
+      if (depth > 0) {
+        depth++;
+        try {
+          return target.apply(list, items);
+        } finally {
+          depth--;
+        }
+      }
       const started = Date.now();
       const ids = items.map(() => ++seq);
       items.forEach((item: any, index: number) => prepare(item, ids[index] as number));
-      const result = inner.apply(list, items);
+      depth++;
+      let result: unknown;
+      try {
+        result = target.apply(list, items);
+      } finally {
+        depth--;
+      }
       items.forEach((item: any, index: number) => record(item, started, ids[index] as number, 'push'));
       return result;
     };
@@ -157,7 +176,7 @@ export function probe(options: ProbeOptions): void {
       enumerable: false,
       get: () => wrapped,
       set: (fn: unknown) => {
-        inner = fn;
+        if (typeof fn === 'function' && fn !== wrapped) chain.push(fn);
       },
     });
     return list;

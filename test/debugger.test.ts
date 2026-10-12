@@ -40,15 +40,18 @@ const LOAD_GTM = `
   window.google_tag_manager = { 'GTM-TEST123': {} };
   window.google_tag_data = { ics: { entries: { ad_storage: { default: false }, analytics_storage: { default: false, update: true } } } };
   var n = 0;
+  // Like gtm.js: keep the push that was there and call it to store the item.
+  var previous = window.dataLayer.push;
   window.dataLayer.push = function () {
+    var result = previous.apply(window.dataLayer, arguments);
     for (var i = 0; i < arguments.length; i++) {
       var o = arguments[i];
       if (o && typeof o === 'object' && !Array.isArray(o)) {
         o['gtm.uniqueEventId'] = ++n;
         if (typeof o.eventCallback === 'function') o.eventCallback('GTM-TEST123', { tags: [{ id: '30', status: 'success', executionTime: 4 }] });
       }
-      Array.prototype.push.call(window.dataLayer, o);
     }
+    return result;
   };
 `.replace(/window\./g, 'globalThis.');
 
@@ -68,6 +71,16 @@ describe('page probe', () => {
     expect(siteCallback).toBe(1); // the site's own callback still runs
     expect(page.messages.find((m) => m.type === 'consent')).toMatchObject({ state: { analytics_storage: { default: false, update: true } } });
     expect(page.messages.find((m) => m.type === 'containers')).toMatchObject({ ids: ['GTM-TEST123'] });
+  });
+
+  it('handles two containers each wrapping push, recording every push once and storing it once', () => {
+    const page = fakePage();
+    page.run(`globalThis.dataLayer = [];`);
+    page.run(LOAD_GTM);
+    page.run(LOAD_GTM.replace("'GTM-TEST123': {}", "'GTM-TEST123': {}, 'GTM-OTHER': {}"));
+    page.run(`dataLayer.push({ event: 'once' });`);
+    expect(page.messages.filter((m) => m.type === 'push').map((m) => m.event)).toEqual(['once']);
+    expect(page.run('dataLayer.length')).toBe(1);
   });
 
   it('survives the page reassigning window.dataLayer and records gtag() commands', () => {
@@ -247,5 +260,37 @@ describe('browser plumbing', () => {
     cdp.close();
     await expect(cdp.send('Page.enable')).rejects.toThrow(/closed/);
     server.close();
+  });
+});
+
+describe('server-side preview replay and local sGTM', async () => {
+  const { decodePreviewHeader, replayWithPreview } = await import('../src/debugger/sgtmPreview');
+  const { localSgtmCommands } = await import('../src/cli/sgtmLocal');
+  const header = Buffer.from('ZW52LTE|env-255|abc123').toString('base64');
+
+  it('validates the X-Gtm-Server-Preview value', () => {
+    expect(decodePreviewHeader(header)).toEqual({ debug: 'ZW52LTE', environment: 'env-255', auth: 'abc123' });
+    expect(() => decodePreviewHeader('nonsense')).toThrow(/X-Gtm-Server-Preview/);
+  });
+
+  it('replays a captured first-party hit with the header and its body', async () => {
+    const hit = classifyHit('https://sgtm.shop.example/g/collect?tid=G-1', 'POST', 'en=purchase', 1)!;
+    let sent: RequestInit | undefined;
+    const result = await replayWithPreview(hit, header, (async (_url: string, init: RequestInit) => {
+      sent = init;
+      return new Response('ok', { status: 200 });
+    }) as unknown as typeof fetch);
+    expect(result.status).toBe(200);
+    expect((sent?.headers as Record<string, string>)['X-Gtm-Server-Preview']).toBe(header);
+    expect(sent?.body).toBe('en=purchase');
+    const vendor = classifyHit('https://www.google-analytics.com/g/collect?tid=G-1', 'POST', 'en=x', 1)!;
+    await expect(replayWithPreview(vendor, header)).rejects.toThrow(/server container/);
+  });
+
+  it('builds the preview + tagging docker commands for the official image', () => {
+    const [preview, tagging] = localSgtmCommands({ config: 'aWQ9R1RNLVhYWFgmZW52PTEmYXV0aD1hYmM=', port: 8080, previewPort: 8081 });
+    expect(preview).toContain('RUN_AS_PREVIEW_SERVER=true');
+    expect(tagging).toContain('PREVIEW_SERVER_URL=http://host.docker.internal:8081');
+    expect(() => localSgtmCommands({ config: 'x', port: 1, previewPort: 2 })).toThrow(/CONTAINER_CONFIG/);
   });
 });

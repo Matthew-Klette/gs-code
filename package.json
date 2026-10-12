@@ -17,19 +17,28 @@
     "url": "https://github.com/Matthew-Klette/gs-code/issues"
   },
   "engines": {
-    "vscode": "^1.90.0",
+    "vscode": "^1.95.0",
     "node": ">=20"
   },
   "categories": [
     "Other",
-    "SCM Providers"
+    "SCM Providers",
+    "Debuggers",
+    "AI"
   ],
   "keywords": [
+    "ai agent",
+    "analytics",
+    "consent mode",
+    "data layer",
+    "debugger",
     "google tag manager",
     "gtm",
+    "mcp",
+    "preview",
     "server-side gtm",
     "sgtm",
-    "analytics",
+    "tag assistant",
     "tagging"
   ],
   "icon": "media/icon.png",
@@ -166,6 +175,12 @@
         "command": "gsCode.versions",
         "title": "Versions / Roll Back…",
         "category": "GS Code"
+      },
+      {
+        "command": "gsCode.debug",
+        "title": "Open Debugger",
+        "category": "GS Code",
+        "icon": "$(debug-alt)"
       }
     ],
     "menus": {
@@ -179,6 +194,11 @@
           "command": "gsCode.pull",
           "when": "scmProvider == gtm",
           "group": "navigation@2"
+        },
+        {
+          "command": "gsCode.debug",
+          "when": "scmProvider == gtm",
+          "group": "navigation@4"
         },
         {
           "command": "gsCode.refresh",
@@ -301,6 +321,42 @@
           "default": 60,
           "minimum": 15,
           "markdownDescription": "Seconds between background checks for GTM changes (minimum 15). The GTM API allows 25 requests per 100 seconds per Google Cloud project; at 60 s a check uses about 3."
+        },
+        "gsCode.debug.browserUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Attach the debugger to a Chromium-based browser that already runs with `--remote-debugging-port`, e.g. `http://127.0.0.1:9222`. Empty: GS Code launches your installed Chrome, Edge, Brave or Chromium with its own profile."
+        },
+        "gsCode.debug.browserPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the Chromium-based browser to launch. Empty: the first one found."
+        },
+        "gsCode.debug.sgtmHosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Hosts of your server-side GTM (e.g. `sgtm.example.com`), so every request to them is recorded as a server-container hit."
+        },
+        "gsCode.debug.loaderPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "URL patterns (with `*`) of a custom gtm.js loader (e.g. Stape's first-party loader). In workspace mode they are redirected to the draft workspace on googletagmanager.com."
+        },
+        "gsCode.debug.dataLayerName": {
+          "type": "string",
+          "default": "dataLayer",
+          "markdownDescription": "Name of the page's data layer array, if it is not `dataLayer`."
+        },
+        "gsCode.debug.tagStatus": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Read each tag's status per event by adding an `eventCallback` to dataLayer events (a site's own callback still runs). Turn off if a site's code is sensitive to it."
         }
       }
     },
@@ -360,6 +416,305 @@
         "view": "scm",
         "contents": "Edit a Google Tag Manager workspace as files with GS Code.\n[Open GTM Workspace…](command:gsCode.open)\n[Adopt a Folder…](command:gsCode.adoptFolder)\nFirst time? [Get started](command:workbench.action.openWalkthrough?%5B%22matthew-klette.gs-code%23getStarted%22%5D)"
       }
+    ],
+    "languageModelTools": [
+      {
+        "name": "gtm_status",
+        "displayName": "GTM status",
+        "modelDescription": "Local changes in the open GTM mirror that Push would send, with conflicts and validation problems. Returns an `expected` signature for gtm_push.",
+        "userDescription": "Local changes in the open GTM mirror that Push would send, with conflicts and validation problems. Returns an `expected` signature for gtm_push.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gtm_status",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder (default: the open one)"
+            }
+          }
+        }
+      },
+      {
+        "name": "gtm_pull",
+        "displayName": "GTM pull",
+        "modelDescription": "Pull the latest workspace contents from GTM into the mirror (three-way merge; local edits are kept).",
+        "userDescription": "Pull the latest workspace contents from GTM into the mirror (three-way merge; local edits are kept).",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gtm_pull",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            }
+          }
+        }
+      },
+      {
+        "name": "gtm_push",
+        "displayName": "GTM push",
+        "modelDescription": "Push the reviewed local changes to the GTM workspace (never live; agents cannot publish). Pass `expected` from gtm_status.",
+        "userDescription": "Push the reviewed local changes to the GTM workspace (never live; agents cannot publish). Pass `expected` from gtm_status.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gtm_push",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            },
+            "expected": {
+              "type": "string",
+              "description": "Signature from gtm_status"
+            }
+          },
+          "required": [
+            "expected"
+          ]
+        }
+      },
+      {
+        "name": "debug_start",
+        "displayName": "Debug a page",
+        "modelDescription": "Open a page in the GS Code debugger and record dataLayer events, tag status, consent and network hits. mode 'workspace' loads the unpublished workspace, 'live' the published container.",
+        "userDescription": "Open a page in the GS Code debugger and record dataLayer events, tag status, consent and network hits. mode 'workspace' loads the unpublished workspace, 'live' the published container.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_start",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Page to open"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "workspace",
+                "live"
+              ],
+              "description": "Default workspace"
+            },
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            },
+            "tab": {
+              "type": "string",
+              "description": "Use an already open tab whose URL starts with this (attached browsers only)"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        }
+      },
+      {
+        "name": "debug_events",
+        "displayName": "Debug events",
+        "modelDescription": "Recorded events of the latest page: sequence number, event name, tags fired, hits sent.",
+        "userDescription": "Recorded events of the latest page: sequence number, event name, tags fired, hits sent.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_events",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "page": {
+              "type": "number",
+              "description": "Page number"
+            },
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            }
+          }
+        }
+      },
+      {
+        "name": "debug_event",
+        "displayName": "Debug event detail",
+        "modelDescription": "One recorded event in detail: pushed data, data model, consent, tag statuses, hits.",
+        "userDescription": "One recorded event in detail: pushed data, data model, consent, tag statuses, hits.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_event",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "number",
+              "description": "Event sequence number"
+            },
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            }
+          },
+          "required": [
+            "seq"
+          ]
+        }
+      },
+      {
+        "name": "debug_explain",
+        "displayName": "Explain tags",
+        "modelDescription": "Why tags fired or did not fire on an event: triggers and conditions with compared values, and the mirror file to edit.",
+        "userDescription": "Why tags fired or did not fire on an event: triggers and conditions with compared values, and the mirror file to edit.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_explain",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "seq": {
+              "type": "number",
+              "description": "Event sequence number"
+            },
+            "tag": {
+              "type": "string",
+              "description": "Tag name (optional)"
+            },
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            }
+          },
+          "required": [
+            "seq"
+          ]
+        }
+      },
+      {
+        "name": "debug_hits",
+        "displayName": "Debug hits",
+        "modelDescription": "Network hits (GA4, Google Ads, Meta, server container…), filtered by vendor or event name.",
+        "userDescription": "Network hits (GA4, Google Ads, Meta, server container…), filtered by vendor or event name.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_hits",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "vendor": {
+              "type": "string",
+              "description": "Vendor"
+            },
+            "name": {
+              "type": "string",
+              "description": "Event name"
+            },
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            }
+          }
+        }
+      },
+      {
+        "name": "debug_replay_sgtm",
+        "displayName": "Replay into sGTM preview",
+        "modelDescription": "Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview, 'Send requests manually'), so they show up in that sGTM preview.",
+        "userDescription": "Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview, 'Send requests manually'), so they show up in that sGTM preview.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_replay_sgtm",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "header": {
+              "type": "string",
+              "description": "X-Gtm-Server-Preview value"
+            },
+            "name": {
+              "type": "string",
+              "description": "Only hits for this event name"
+            },
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder"
+            }
+          },
+          "required": [
+            "header"
+          ]
+        }
+      },
+      {
+        "name": "debug_navigate",
+        "displayName": "Debug navigate",
+        "modelDescription": "Navigate the debug tab to a URL.",
+        "userDescription": "Navigate the debug tab to a URL.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_navigate",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "URL"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        }
+      },
+      {
+        "name": "debug_reload",
+        "displayName": "Debug reload",
+        "modelDescription": "Reload the debug tab (after pushing a fix).",
+        "userDescription": "Reload the debug tab (after pushing a fix).",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_reload",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "debug_push",
+        "displayName": "Debug dataLayer push",
+        "modelDescription": "Push a JSON object to the page's dataLayer to reproduce an event.",
+        "userDescription": "Push a JSON object to the page's dataLayer to reproduce an event.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_push",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string",
+              "description": "JSON object"
+            }
+          },
+          "required": [
+            "data"
+          ]
+        }
+      },
+      {
+        "name": "debug_stop",
+        "displayName": "Debug stop",
+        "modelDescription": "Stop the debug session.",
+        "userDescription": "Stop the debug session.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "debug_stop",
+        "icon": "$(debug-alt)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
     ]
   },
   "scripts": {
@@ -377,7 +732,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
-    "@types/vscode": "1.90.0",
+    "@types/vscode": "1.95.0",
     "@types/ws": "8.5.12",
     "@vitest/coverage-v8": "^5.0.4",
     "@vscode/test-electron": "^2.5.2",

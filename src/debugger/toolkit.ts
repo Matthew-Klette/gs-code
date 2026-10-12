@@ -14,6 +14,7 @@ import { Explainer } from './explain';
 import type { Hit } from './hits';
 import { eventContext, loadMirrorDocs, predictClient, resolveWorkspacePreview } from './mirrorContext';
 import { DebugSession } from './session';
+import { replayWithPreview } from './sgtmPreview';
 import { Timeline, type TimelineEvent } from './timeline';
 import { VariableResolver } from './variables';
 
@@ -94,10 +95,15 @@ export class Toolkit {
           'Open a page in the debug browser and record dataLayer events, tag status, consent and network hits. mode "workspace" loads the mirror\'s unpublished workspace (preview), "live" the published container.',
         inputSchema: {
           type: 'object',
-          properties: { ...dir, url: { type: 'string', description: 'Page to open' }, mode: { type: 'string', enum: ['workspace', 'live'], description: 'Default: workspace' } },
+          properties: {
+            ...dir,
+            url: { type: 'string', description: 'Page to open' },
+            mode: { type: 'string', enum: ['workspace', 'live'], description: 'Default: workspace' },
+            tab: { type: 'string', description: 'Use an already open tab whose URL starts with this (attached browsers only)' },
+          },
           required: ['url'],
         },
-        run: async (input) => this.start(this.root(input), String(input.url), input.mode === 'live' ? 'live' : 'workspace'),
+        run: async (input) => this.start(this.root(input), String(input.url), input.mode === 'live' ? 'live' : 'workspace', typeof input.tab === 'string' ? input.tab : undefined),
       },
       {
         name: 'debug_events',
@@ -123,6 +129,27 @@ export class Toolkit {
         description: 'Network hits (GA4, Google Ads, Meta, server container…), optionally filtered by vendor or event name. Server-container hits include the client predicted to claim them.',
         inputSchema: { type: 'object', properties: { ...dir, vendor: { type: 'string', description: 'ga4, google-ads, meta, sgtm…' }, name: { type: 'string', description: 'Event name, e.g. purchase' } } },
         run: async (input) => this.hits(this.root(input), await this.timeline(input), input),
+      },
+      {
+        name: 'debug_replay_sgtm',
+        description:
+          'Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview → "Send requests manually"), so they appear in that sGTM preview with the claiming client, tags and outgoing requests.',
+        inputSchema: {
+          type: 'object',
+          properties: { ...dir, header: { type: 'string', description: 'X-Gtm-Server-Preview value' }, name: { type: 'string', description: 'Only hits for this event name (optional)' } },
+          required: ['header'],
+        },
+        run: async (input) => {
+          const timeline = await this.timeline(input);
+          const hits = timeline.allHits().filter((hit) => hit.firstParty && hit.vendor !== 'gtm' && (!input.name || hit.name === input.name));
+          if (hits.length === 0) return 'No captured server-container requests to replay.';
+          const lines: string[] = [];
+          for (const hit of hits) {
+            const result = await replayWithPreview(hit, String(input.header));
+            lines.push(`${result.status} ${hit.method} ${hit.url.slice(0, 120)}`);
+          }
+          return `${lines.join('\n')}\nOpen your sGTM preview tab to see how each request was handled.`;
+        },
       },
       {
         name: 'debug_navigate',
@@ -192,7 +219,7 @@ export class Toolkit {
     return lines.join('\n');
   }
 
-  private async start(root: string, url: string, mode: 'workspace' | 'live'): Promise<string> {
+  private async start(root: string, url: string, mode: 'workspace' | 'live', tab?: string): Promise<string> {
     await this.activeSession?.stop();
     const state = await readState(root);
     const docs = await loadMirrorDocs(root, state);
@@ -209,6 +236,7 @@ export class Toolkit {
       sgtmHosts: settings.sgtmHosts,
       loaderPatterns: settings.loaderPatterns,
       dataLayerName: settings.dataLayerName,
+      attachToTab: tab,
     });
     await session.start();
     this.session = session;

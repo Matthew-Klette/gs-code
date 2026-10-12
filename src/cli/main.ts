@@ -19,6 +19,7 @@ import { GtmError, WorkspaceGoneError, type WorkspaceInfo } from '../core/types'
 import { configDir, FileCredentialStore, fileStampStore, loadCliConfig } from './fileStore';
 import { Toolkit } from '../debugger/toolkit';
 import { serveMcp } from './mcp';
+import { runLocalSgtm } from './sgtmLocal';
 import { RateLimiter } from '../core/rateLimiter';
 
 const HELP = `gscode: edit a Google Tag Manager workspace as files
@@ -47,12 +48,16 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode publish [dir] --version <id> --confirm <GTM-XXXX> [--rollback]
                                      publish an existing version (--rollback: an older one, on purpose)
   gscode versions [dir]              list container versions (* = live)
-  gscode debug <url> [--dir dir] [--live]
+  gscode debug <url> [--dir dir] [--live] [--tab <url prefix>]
                                      record a page in the debug browser: events, tags, consent, hits
                                      (default: your unpublished workspace; --live: the published container)
   gscode explain <seq> [tag] [--dir dir]
                                      why tags fired or not on a recorded event (latest session)
   gscode mcp [--dir dir]             MCP server for AI agents: claude mcp add gscode -- gscode mcp
+  gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]
+                                     re-send captured server-container requests into your sGTM preview
+  gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]
+                                     run your server container locally in Docker (official image), with preview
   gscode environments [dir]          list environments (live, latest, workspace previews, your own)
 
 Protected containers (version/publish blocked): ~/.config/gs-code/config.json
@@ -311,11 +316,11 @@ function toolkit(defaultRoot: string): Toolkit {
   });
 }
 
-async function cmdDebug(url: string | undefined, values: { dir?: string; live?: boolean }) {
+async function cmdDebug(url: string | undefined, values: { dir?: string; live?: boolean; tab?: string }) {
   if (!url) throw new GtmError('Usage: gscode debug <url> [--dir dir] [--live]');
   const root = path.resolve(values.dir ?? '.');
   const kit = toolkit(root);
-  out(await kit.run('debug_start', { url, mode: values.live ? 'live' : 'workspace' }));
+  out(await kit.run('debug_start', { url, mode: values.live ? 'live' : 'workspace', ...(values.tab ? { tab: values.tab } : {}) }));
   const session = kit.activeSession;
   if (!session) return;
   let shown = 0;
@@ -366,7 +371,8 @@ async function main(argv: string[]): Promise<void> {
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
       interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
-      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' }, rollback: { type: 'boolean' }, live: { type: 'boolean' },
+      'no-sync': { type: 'boolean' }, new: { type: 'string' }, manual: { type: 'boolean' }, 'forget-client': { type: 'boolean' }, adopt: { type: 'boolean' }, rollback: { type: 'boolean' }, live: { type: 'boolean' }, tab: { type: 'string' }, header: { type: 'string' },
+      config: { type: 'string' }, port: { type: 'string' }, 'preview-port': { type: 'string' },
     },
   });
   const [command, ...rest] = positionals;
@@ -421,6 +427,14 @@ async function main(argv: string[]): Promise<void> {
       return out(await toolkit(dir).run('debug_explain', { seq: Number(rest[0]), ...(rest[1] ? { tag: rest.slice(1).join(' ') } : {}) }));
     }
     case 'mcp': return serveMcp(toolkit(path.resolve(values.dir ?? '.')));
+    case 'replay-sgtm': {
+      if (!values.header) throw new GtmError('Usage: gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]');
+      return out(await toolkit(path.resolve(values.dir ?? '.')).run('debug_replay_sgtm', { header: values.header, ...(values.name ? { name: values.name } : {}) }));
+    }
+    case 'sgtm-local': {
+      if (!values.config) throw new GtmError('Usage: gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]');
+      return runLocalSgtm({ config: values.config, port: Number(values.port ?? 8080), previewPort: Number(values['preview-port'] ?? 8081) }, out);
+    }
     case 'environments': return cmdEnvironments(root);
     case 'switch': return cmdSwitch(root, { workspace: values.workspace, new: values.new });
     default: return out(HELP);

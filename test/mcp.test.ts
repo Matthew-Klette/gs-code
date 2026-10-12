@@ -93,3 +93,11 @@ describe('MCP server', () => {
     mcp.end();
   });
 });
+
+describe('VS Code language-model tools', () => {
+  it('package.json declares exactly the toolkit\'s tools', async () => {
+    const pkg = JSON.parse(await readFile(path.join(__dirname, '..', 'package.json'), 'utf8')) as { contributes: { languageModelTools: { name: string }[] } };
+    const declared = pkg.contributes.languageModelTools.map((tool) => tool.name).sort();
+    expect(declared).toEqual(kitFor().definitions().map((tool) => tool.name).sort());
+  });
+});

@@ -33,6 +33,11 @@ export interface DebugSessionOptions {
   readonly tagNames?: ReadonlyMap<string, string>;
   readonly container?: string;
   readonly workspace?: string;
+  /**
+   * Use a tab that is already open in the attached browser (its URL starts with this) instead of
+   * opening a new one. The tab is left open when the session stops.
+   */
+  readonly attachToTab?: string;
 }
 
 /**
@@ -45,6 +50,7 @@ export class DebugSession extends EventEmitter {
   private browser?: Browser;
   private sessionId?: string;
   private targetId?: string;
+  private ownTab = true;
   private page = 0;
   private stopped = false;
   private readonly pendingHits = new Set<string>();
@@ -72,7 +78,7 @@ export class DebugSession extends EventEmitter {
       this.stopped = true;
       this.emit('stopped');
     });
-    const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
+    const targetId = await this.pickTarget();
     this.targetId = targetId;
     const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true });
     this.sessionId = sessionId;
@@ -90,6 +96,19 @@ export class DebugSession extends EventEmitter {
     await this.navigate(this.options.url);
   }
 
+  private async pickTarget(): Promise<string> {
+    const cdp = (this.browser as Browser).cdp;
+    if (this.options.attachToTab) {
+      const { targetInfos } = await cdp.send<{ targetInfos: { targetId: string; type: string; url: string }[] }>('Target.getTargets');
+      const tab = targetInfos.find((info) => info.type === 'page' && info.url.startsWith(this.options.attachToTab as string));
+      if (!tab) throw new GtmError(`No open tab starts with ${this.options.attachToTab}. Open the page in the browser first.`);
+      this.ownTab = false;
+      return tab.targetId;
+    }
+    const { targetId } = await cdp.send<{ targetId: string }>('Target.createTarget', { url: 'about:blank' });
+    return targetId;
+  }
+
   async navigate(url: string): Promise<void> {
     await this.send('Page.navigate', { url });
   }
@@ -100,8 +119,8 @@ export class DebugSession extends EventEmitter {
 
   /** Evaluate JS in the page (custom JS variables, cookies, DOM) and return its value. */
   async evaluate(expression: string): Promise<unknown> {
-    const result = await this.send<{ result?: { value?: unknown }; exceptionDetails?: { text?: string } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (result.exceptionDetails) throw new GtmError(result.exceptionDetails.text ?? 'evaluation failed');
+    const result = await this.send<{ result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+    if (result.exceptionDetails) throw new GtmError(result.exceptionDetails.exception?.description?.split('\n')[0] ?? result.exceptionDetails.text ?? 'evaluation failed');
     return result.result?.value;
   }
 
@@ -117,8 +136,9 @@ export class DebugSession extends EventEmitter {
     if (!browser) return;
     if (browser.launched) await browser.close();
     else {
-      // Attached to the user's own browser: close only our tab, never their browser.
-      if (this.targetId) await browser.cdp.send('Target.closeTarget', { targetId: this.targetId }).catch(() => undefined);
+      // Attached to the user's own browser: close only a tab we opened, never their browser or their tab.
+      if (this.targetId && this.ownTab) await browser.cdp.send('Target.closeTarget', { targetId: this.targetId }).catch(() => undefined);
+      else if (this.sessionId) await browser.cdp.send('Target.detachFromTarget', { sessionId: this.sessionId }).catch(() => undefined);
       browser.cdp.close();
     }
     this.emit('stopped');
