@@ -1,0 +1,234 @@
+{
+  "name": "gs-code",
+  "displayName": "GS Code",
+  "description": "GS Code (Google Studio Code): edit an entire Google Tag Manager workspace as files in VS Code. Pull, diff, push, version and publish.",
+  "version": "0.1.0",
+  "publisher": "matthew-klette",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Matthew-Klette/gs-code.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=20"
+  },
+  "categories": [
+    "Other",
+    "SCM Providers"
+  ],
+  "keywords": [
+    "google tag manager",
+    "gtm",
+    "server-side gtm",
+    "sgtm",
+    "analytics",
+    "tagging"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "bin": {
+    "gscode": "./dist/cli.js"
+  },
+  "activationEvents": [
+    "workspaceContains:**/.gtm/state.json"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "gsCode.configureClient",
+        "title": "Configure OAuth Client",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.signIn",
+        "title": "Sign In",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.signOut",
+        "title": "Sign Out",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.open",
+        "title": "Open Workspace…",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.pull",
+        "title": "Pull",
+        "category": "GS Code",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "gsCode.push",
+        "title": "Push",
+        "category": "GS Code",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "gsCode.refresh",
+        "title": "Refresh Changes",
+        "category": "GS Code",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "gsCode.createVersion",
+        "title": "Create Version",
+        "category": "GS Code",
+        "icon": "$(tag)"
+      },
+      {
+        "command": "gsCode.publish",
+        "title": "Create Version and Publish",
+        "category": "GS Code",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "gsCode.openInGtm",
+        "title": "Open in Tag Manager",
+        "category": "GS Code",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "gsCode.discard",
+        "title": "Discard Changes",
+        "category": "GS Code",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "gsCode.resolveMine",
+        "title": "Resolve Conflict: Keep Mine",
+        "category": "GS Code"
+      },
+      {
+        "command": "gsCode.resolveTheirs",
+        "title": "Resolve Conflict: Take Theirs",
+        "category": "GS Code"
+      }
+    ],
+    "menus": {
+      "scm/title": [
+        {
+          "command": "gsCode.push",
+          "when": "scmProvider == gtm",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gsCode.pull",
+          "when": "scmProvider == gtm",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gsCode.refresh",
+          "when": "scmProvider == gtm",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gsCode.createVersion",
+          "when": "scmProvider == gtm",
+          "group": "1_publish@1"
+        },
+        {
+          "command": "gsCode.publish",
+          "when": "scmProvider == gtm && config.gsCode.allowPublish",
+          "group": "1_publish@2"
+        },
+        {
+          "command": "gsCode.openInGtm",
+          "when": "scmProvider == gtm",
+          "group": "2_misc@1"
+        },
+        {
+          "command": "gsCode.discard",
+          "when": "scmProvider == gtm",
+          "group": "2_misc@2"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "gsCode.discard",
+          "when": "scmProvider == gtm && scmResourceGroup == changes",
+          "group": "inline"
+        },
+        {
+          "command": "gsCode.resolveMine",
+          "when": "scmProvider == gtm && scmResourceGroup == conflicts"
+        },
+        {
+          "command": "gsCode.resolveTheirs",
+          "when": "scmProvider == gtm && scmResourceGroup == conflicts"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "gsCode.discard",
+          "when": "false"
+        },
+        {
+          "command": "gsCode.resolveMine",
+          "when": "false"
+        },
+        {
+          "command": "gsCode.resolveTheirs",
+          "when": "false"
+        },
+        {
+          "command": "gsCode.publish",
+          "when": "config.gsCode.allowPublish"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "GS Code",
+      "properties": {
+        "gsCode.protectedContainers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Container public IDs (e.g. `GTM-XXXXXXX`) where **Create Version** and **Publish** are blocked. Pull and Push still work. Keep this in your User settings, not in a shared repo."
+        },
+        "gsCode.pushStrategy": {
+          "type": "string",
+          "enum": [
+            "bulk",
+            "sequential"
+          ],
+          "default": "bulk",
+          "markdownDescription": "`bulk` sends all changes in one `workspaces.bulk_update` call (fast, recommended). `sequential` uses one API call per entity (slow under the 0.25 QPS quota, but reports per-entity errors)."
+        },
+        "gsCode.allowPublish": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Request the `tagmanager.publish` OAuth scope at sign-in and enable **Create Version and Publish**. Set to `false` and sign in again for a token that cannot publish at all."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "package": "npm run build && vsce package --no-dependencies",
+    "test:extension": "node esbuild.mjs --tests && node dist/test/runTest.js",
+    "check:safety": "node scripts/check-publish-safety.mjs"
+  },
+  "dependencies": {
+    "google-auth-library": "^10.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/vscode": "1.90.0",
+    "@vitest/coverage-v8": "^5.0.4",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.4"
+  }
+}

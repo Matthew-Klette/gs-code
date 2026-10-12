@@ -1,0 +1,20 @@
+node_modules/
+dist/
+out/
+coverage/
+*.vsix
+.DS_Store
+
+# Secrets: OAuth clients downloaded from Google Cloud, tokens
+client_secret*.json
+*OAuth*Client*.json
+tokens.json
+
+# Never commit GTM data to this repo (it is the extension only):
+# mirror folders, their state, and container exports.
+.gtm/
+**/.gtm/
+GTM-*/
+GTM-*.json
+*container*export*.json
+gtm-mirrors/
