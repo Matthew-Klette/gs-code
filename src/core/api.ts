@@ -1,6 +1,7 @@
 import { KIND_ORDER, KIND_SPECS, SERVER_ONLY_KINDS, type EntityKind } from './kinds';
 import { backoffDelay, DEFAULT_RETRY, RateLimiter, systemClock, type Clock, type RetryPolicy } from './rateLimiter';
 import {
+  DailyQuotaError,
   GtmError,
   workspacePath,
   type AccountInfo,
@@ -42,7 +43,12 @@ export interface GtmApi {
   /** Bring the workspace up to the latest container version. */
   syncWorkspace(ref: WorkspaceRef): Promise<SyncResult>;
   resolveConflict(ref: WorkspaceRef, entity: ApiChange, fingerprint?: string): Promise<void>;
-  fetchSnapshot(ref: WorkspaceRef, usageContext?: readonly string[]): Promise<RemoteSnapshot>;
+  /**
+   * Every entity in the workspace. With `only`, just those kinds (plus folders and built-ins, which are
+   * always merged as whole lists); the rest are reported `unavailable`, so nothing reads them as deleted.
+   */
+  fetchSnapshot(ref: WorkspaceRef, usageContext?: readonly string[], only?: readonly EntityKind[]): Promise<RemoteSnapshot>;
+  getEntity(ref: WorkspaceRef, kind: EntityKind, id: string): Promise<ApiEntity>;
   createEntity(ref: WorkspaceRef, kind: EntityKind, body: ApiEntity): Promise<ApiEntity>;
   updateEntity(ref: WorkspaceRef, kind: EntityKind, id: string, body: ApiEntity, fingerprint?: string): Promise<ApiEntity>;
   deleteEntity(ref: WorkspaceRef, kind: EntityKind, id: string): Promise<void>;
@@ -153,12 +159,18 @@ export class HttpGtmApi implements GtmApi {
     await this.request('POST', `${workspacePath(ref)}:resolve_conflict${query}`, entity);
   }
 
-  async fetchSnapshot(ref: WorkspaceRef, usageContext: readonly string[] = []): Promise<RemoteSnapshot> {
+  async fetchSnapshot(ref: WorkspaceRef, usageContext: readonly string[] = [], only?: readonly EntityKind[]): Promise<RemoteSnapshot> {
     const isServer = usageContext.includes('server');
     const base = workspacePath(ref);
     const entries: [EntityKind, ApiEntity[]][] = [];
     const unavailable: EntityKind[] = [];
+    const wanted = only ? new Set<EntityKind>([...only, 'folder']) : undefined;
     for (const kind of KIND_ORDER) {
+      if (wanted && !wanted.has(kind)) {
+        unavailable.push(kind);
+        entries.push([kind, []]);
+        continue;
+      }
       if (SERVER_ONLY_KINDS.has(kind) && usageContext.length > 0 && !isServer) {
         entries.push([kind, []]);
         continue;
@@ -174,6 +186,10 @@ export class HttpGtmApi implements GtmApi {
       builtInVariables: builtIns.map((item): BuiltInVariable => ({ type: String(item.type), name: item.name as string | undefined })),
       unavailable,
     };
+  }
+
+  async getEntity(ref: WorkspaceRef, kind: EntityKind, id: string): Promise<ApiEntity> {
+    return this.request('GET', `${workspacePath(ref)}/${KIND_SPECS[kind].collection}/${id}`);
   }
 
   async createEntity(ref: WorkspaceRef, kind: EntityKind, body: ApiEntity): Promise<ApiEntity> {
@@ -262,6 +278,7 @@ export class HttpGtmApi implements GtmApi {
       if (response.ok) return parsed;
 
       const error = toGtmError(method, path, response.status, parsed, text);
+      if (isDailyQuota(response.status, parsed)) throw new DailyQuotaError(error.message);
       // Writes may have been applied before a 5xx; retrying could duplicate them. Only retry quota errors.
       const retryable = method === 'GET' ? isRetryable(response.status, parsed) : isQuotaError(response.status, parsed);
       if (!retryable || attempt + 1 >= this.retry.maxAttempts) throw error;
@@ -308,6 +325,14 @@ function errorReasons(parsed: Record<string, unknown>): string[] {
     error.status,
   ];
   return reasons.filter((reason): reason is string => typeof reason === 'string');
+}
+
+/** "Requests per day" (or dailyLimitExceeded): waiting minutes will not help. */
+export function isDailyQuota(status: number, parsed: Record<string, unknown>): boolean {
+  if (!isQuotaError(status, parsed)) return false;
+  if (errorReasons(parsed).some((reason) => /daily/i.test(reason))) return true;
+  const message = String((parsed.error as { message?: string } | undefined)?.message ?? '');
+  return /per day|daily/i.test(message);
 }
 
 export function isRetryable(status: number, parsed: Record<string, unknown>): boolean {

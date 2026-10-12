@@ -217,13 +217,24 @@ export class FakeGtm implements GtmApi {
     return this.workspace;
   }
 
-  async fetchSnapshot(ref: WorkspaceRef): Promise<RemoteSnapshot> {
+  async fetchSnapshot(ref: WorkspaceRef, _usage?: readonly string[], only?: readonly EntityKind[]): Promise<RemoteSnapshot> {
     this.assertWorkspace(ref);
-    this.calls.push('snapshot');
+    const wanted = only ? new Set<EntityKind>([...only, 'folder']) : undefined;
+    this.calls.push(wanted ? `snapshot ${[...wanted].join(',')}` : 'snapshot');
+    const entities = structuredClone(this.entities);
+    const unavailable = wanted ? KIND_ORDER.filter((kind) => !wanted.has(kind)) : [];
+    for (const kind of unavailable) entities[kind] = [];
     return {
-      entities: structuredClone(this.entities),
+      entities,
       builtInVariables: [...this.builtIns].map((type) => ({ type, name: BUILTIN_NAMES[type] ?? type })),
+      unavailable,
     };
+  }
+
+  async getEntity(ref: WorkspaceRef, kind: EntityKind, id: string): Promise<ApiEntity> {
+    this.assertWorkspace(ref);
+    this.calls.push(`get ${kind}`);
+    return structuredClone(this.byId(kind, id));
   }
 
   async createEntity(ref: WorkspaceRef, kind: EntityKind, body: ApiEntity): Promise<ApiEntity> {

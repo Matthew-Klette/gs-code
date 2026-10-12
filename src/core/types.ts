@@ -89,6 +89,17 @@ export class GtmError extends Error {
   }
 }
 
+/**
+ * The Google Cloud project's daily Tag Manager API quota is used up. Retrying is pointless until it
+ * resets (midnight Pacific time). Teams sharing one OAuth client share this quota.
+ */
+export class DailyQuotaError extends GtmError {
+  constructor(detail: string) {
+    super(`The Tag Manager API daily quota for your Google Cloud project is used up; it resets at midnight Pacific time. (${detail})`, 429);
+    this.name = 'DailyQuotaError';
+  }
+}
+
 /** Not signed in, or the sign-in expired. Retrying will not help; the user has to sign in again. */
 export class AuthError extends GtmError {
   constructor(message: string) {

@@ -10,7 +10,7 @@ import { AutoPull, clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/a
 import { workingStatus, type WorkingStatus } from '../core/ops/plan';
 import type { RefreshResult } from '../core/ops/sync';
 import { renderFiles } from '../core/serialize/entityFiles';
-import { WorkspaceGoneError } from '../core/types';
+import { AuthError, WorkspaceGoneError } from '../core/types';
 
 const DEBOUNCE_MS = 300;
 
@@ -105,10 +105,12 @@ export class MirrorController implements vscode.Disposable, vscode.QuickDiffProv
           void vscode.window.showWarningMessage(`GS Code: ${message}`, 'Switch Workspace…').then((choice) => {
             if (choice) void vscode.commands.executeCommand('gsCode.switchWorkspace', this.scm);
           });
-        } else if (fatal) {
+        } else if (fatal && error instanceof AuthError) {
           void vscode.window.showWarningMessage(`GS Code stopped checking GTM for changes: ${message}`, 'Sign In').then((choice) => {
             if (choice) void vscode.commands.executeCommand('gsCode.signIn');
           });
+        } else if (fatal) {
+          void vscode.window.showWarningMessage(`GS Code stopped checking GTM for changes: ${message}`);
         }
         this.onDidChange();
       },

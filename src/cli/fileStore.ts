@@ -2,7 +2,7 @@ import type { Credentials } from 'google-auth-library';
 import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import * as path from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { CredentialStore, OAuthClientConfig } from '../core/auth/oauth';
 import type { StampStore } from '../core/rateLimiter';
 
@@ -61,20 +61,32 @@ export async function loadCliConfig(dir = configDir()): Promise<CliConfig> {
 }
 
 /** Request timestamps shared by every `gscode` run, so back-to-back commands respect the quota. */
+/** Stamps older than this are dropped from the shared file (the quota window is 100 s). */
+const STAMP_HORIZON_MS = 200_000;
+
 export function fileStampStore(dir = configDir()): StampStore {
   const file = path.join(dir, 'ratelimit.json');
+  const load = (): number[] => {
+    try {
+      const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      return Array.isArray(value) ? value.filter((item): item is number => typeof item === 'number') : [];
+    } catch {
+      return [];
+    }
+  };
   return {
-    load: () => {
-      try {
-        const value: unknown = JSON.parse(readFileSync(file, 'utf8'));
-        return Array.isArray(value) ? value.filter((item): item is number => typeof item === 'number') : [];
-      } catch {
-        return [];
-      }
-    },
+    load,
     save: (stamps) => {
       try {
-        writeFileSync(file, JSON.stringify(stamps), { mode: 0o600 });
+        // Write a private temp file and rename it over, so a concurrent reader never sees half a file
+        // (which would parse as "no recent requests" and allow a burst).
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+        // Merge with what other processes saved since we loaded, so nobody's requests are forgotten.
+        const horizon = Date.now() - STAMP_HORIZON_MS;
+        const merged = [...new Set([...load(), ...stamps])].filter((stamp) => stamp > horizon).sort((a, b) => a - b);
+        writeFileSync(temp, JSON.stringify(merged), { mode: 0o600 });
+        renameSync(temp, file);
       } catch {
         // best effort: the in-process limiter still applies
       }

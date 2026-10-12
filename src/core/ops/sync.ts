@@ -51,6 +51,8 @@ export interface RefreshResult {
   readonly behind?: string;
   /** Why a requested sync did not happen (e.g. no permission to update the workspace). */
   readonly syncSkipped?: string;
+  /** The full snapshot a pull just applied, so a push right after can reuse it. */
+  readonly snapshot?: RemoteSnapshot;
 }
 
 const NO_VERSION = '0';
@@ -124,7 +126,7 @@ async function refreshLocked(root: string, api: GtmApi, initial: MirrorState, op
   };
   await writeState(root, next);
   await writeMergeCopies(root, next, status.mergeConflict, snapshot);
-  return { state: next, pulled: true, pull: { ...pull, state: next }, syncedTo, movedTo, behind, syncSkipped };
+  return { state: next, pulled: true, pull: { ...pull, state: next }, syncedTo, movedTo, behind, syncSkipped, snapshot };
 }
 
 /** `getStatus`, turning "workspace gone" into `WorkspaceGoneError` with the workspaces to choose from. */

@@ -106,6 +106,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
       // A whole file whose remote update waited for this save: merge it now.
       for (const controller of controllers.values()) {
         const rel = path.relative(controller.root, doc.uri.fsPath).split(path.sep).join('/');
+        if (rel.startsWith('..')) continue;
+        controller.autoPull.wake(); // someone is working here: poll at the normal rate
         if (controller.state?.deferred.includes(rel)) void controller.autoPull.check();
       }
     }),

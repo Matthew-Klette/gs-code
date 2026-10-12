@@ -8,10 +8,10 @@ import { entityKey, writeState, type MirrorState, type PushedDoc } from '../mirr
 import { canonicalJson } from '../serialize/canonical';
 import { docName, toApiBody, type EntityDoc } from '../serialize/entityFiles';
 import { collectTriggerReferences, templateType, type IdLookup } from '../serialize/references';
-import { GtmError, type ApiEntity, type BulkEntity, type RemoteSnapshot } from '../types';
+import { GtmError, type ApiEntity, type BulkEntity, type RemoteSnapshot, type WorkspaceStatus } from '../types';
 import { workingStatus } from './plan';
 import { applySnapshot, type PullResult } from './pull';
-import { refreshMirror, statusSignature, type RefreshResult } from './sync';
+import { changedEntity, refreshMirror, statusSignature, type RefreshResult } from './sync';
 
 export type PushStrategy = 'bulk' | 'sequential';
 
@@ -89,9 +89,18 @@ async function pushLocked(root: string, api: GtmApi, initial: MirrorState, optio
     ]);
   }
 
+  // Reuse the snapshot the refresh just pulled; otherwise GTM is unchanged since the last pull and only
+  // what the push needs is fetched (templates for type references, GTM's copy of each deleted entity).
+  const before = pulled.snapshot ?? (await neededForPush(api, state, status.changes));
+  // One cheap call right before writing: anything that changed in GTM since the refresh stops the push.
   progress('Checking GTM for changes made since your last pull…');
-  const before = await api.fetchSnapshot(state.workspace, state.container.usageContext);
-  const conflicts = remoteConflicts(status.changes, state, before);
+  const latestStatus = statusSignature(await api.getWorkspaceStatus(state.workspace));
+  if (latestStatus !== state.remote?.status) {
+    throw new PushBlockedError('GTM changed since your last pull. Nothing was pushed. Pull, resolve, then Push again:', [
+      'Someone edited this workspace in GTM a moment ago.',
+    ]);
+  }
+  const conflicts = pulled.snapshot ? remoteConflicts(status.changes, state, before) : [];
   if (conflicts.length) throw new PushBlockedError('GTM changed since your last pull. Run Pull, resolve, then Push again:', conflicts);
 
   const lookup = buildLookup(status.local.docs, status.changes, state, before);
@@ -119,9 +128,16 @@ async function pushLocked(root: string, api: GtmApi, initial: MirrorState, optio
     progress('Refreshing from GTM…');
     // Status before snapshot: a change landing in between is picked up by the next check.
     const remoteStatus = await api.getWorkspaceStatus(state.workspace);
-    const after = await api.fetchSnapshot(state.workspace, state.container.usageContext);
+    // Only the kinds this push touched; untouched kinds are checked against the status instead.
+    const touched = touchedKinds(status.changes);
+    const after = await api.fetchSnapshot(state.workspace, state.container.usageContext, touched);
     const applied_ = await applySnapshot(root, pending, after, { overlay: options.overlay });
-    const refreshed: MirrorState = { ...applied_.state, remote: { ...state.remote, status: statusSignature(remoteStatus) } };
+    const othersChanged = changedOutside(remoteStatus, touched, applied_.state);
+    const refreshed: MirrorState = {
+      ...applied_.state,
+      // If someone changed an entity we did not re-read, leave the status unrecorded so the next check pulls it.
+      remote: { ...state.remote, status: othersChanged ? undefined : statusSignature(remoteStatus) },
+    };
     await writeState(root, refreshed);
     refresh = { ...applied_, state: refreshed };
   } catch (error: unknown) {
@@ -134,6 +150,43 @@ async function pushLocked(root: string, api: GtmApi, initial: MirrorState, optio
   }
   if (refreshError) throw new GtmError(`Pushed ${total} change(s) to GTM.${refreshNote}`);
   return { pushed: total, before: pulled, refresh };
+}
+
+/** Kinds a change set writes (folders and built-ins are always re-read). */
+export function touchedKinds(changes: ChangeSet): EntityKind[] {
+  const kinds = new Set<EntityKind>(changes.entities.map((change) => change.kind));
+  return KIND_ORDER.filter((kind) => kinds.has(kind));
+}
+
+/** Does the workspace status show a change, in a kind we did not re-read, that the mirror does not have? */
+function changedOutside(status: WorkspaceStatus, touched: readonly EntityKind[], state: MirrorState): boolean {
+  const known = new Map(Object.values(state.entities).map((entry) => [entityKey(entry.kind, entry.id), entry.fingerprint]));
+  const reread = new Set<EntityKind>([...touched, 'folder']);
+  for (const change of status.workspaceChange) {
+    const side = changedEntity(change);
+    if (!side || reread.has(side.kind)) continue;
+    const id = String(side.entity[KIND_SPECS[side.kind].idField]);
+    if (change.changeStatus === 'deleted' ? known.has(entityKey(side.kind, id)) : known.get(entityKey(side.kind, id)) !== side.entity.fingerprint) return true;
+  }
+  return false;
+}
+
+/** What a push needs from GTM when nothing changed since the last pull: far cheaper than a full snapshot. */
+async function neededForPush(api: GtmApi, state: MirrorState, changes: ChangeSet): Promise<RemoteSnapshot> {
+  const usesTemplates = changes.entities.some(
+    (change) => change.kind === 'template' || String((change.local?.data as { type?: unknown } | undefined)?.type ?? '').startsWith('template:'),
+  );
+  const snapshot = await api.fetchSnapshot(state.workspace, state.container.usageContext, usesTemplates ? ['template'] : []);
+  const entities = { ...snapshot.entities } as Record<EntityKind, ApiEntity[]>;
+  for (const change of changes.entities.filter((item) => item.type === 'deleted' && item.id)) {
+    entities[change.kind] = [...entities[change.kind], await api.getEntity(state.workspace, change.kind, change.id as string)];
+  }
+  for (const change of changes.folders.filter((item) => item.type === 'deleted' && item.id)) {
+    if (!entities.folder.some((folder) => String(folder.folderId) === change.id)) {
+      entities.folder = [...entities.folder, await api.getEntity(state.workspace, 'folder', change.id as string)];
+    }
+  }
+  return { ...snapshot, entities };
 }
 
 function message(error: unknown): string {
