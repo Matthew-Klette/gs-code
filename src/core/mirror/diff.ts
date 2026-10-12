@@ -45,6 +45,18 @@ export function countChanges(changes: ChangeSet): number {
   return changes.entities.length + changes.folders.length + changes.builtIns.enable.length + changes.builtIns.disable.length;
 }
 
+/**
+ * Identity of exactly what a push would send. The confirmation dialog shows one change set; if
+ * anything (an agent, another window) edits files before the push runs, this no longer matches.
+ */
+export function changeSignature(changes: ChangeSet): string {
+  return canonicalJson({
+    entities: changes.entities.map((change) => [change.type, change.kind, change.base, change.previousBase ?? null, change.local ? canonicalJson(change.local.data) : null]),
+    folders: changes.folders.map((change) => [change.type, change.name, change.local ? canonicalJson(change.local) : null]),
+    builtIns: changes.builtIns,
+  });
+}
+
 /** Working tree vs `.gtm/base`, i.e. everything Push would send. */
 export function diffModels(local: MirrorModel, base: MirrorModel, state: MirrorState): ChangeSet {
   return {

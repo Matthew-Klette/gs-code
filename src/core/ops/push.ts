@@ -1,9 +1,11 @@
 import type { GtmApi } from '../api';
 import { KIND_ORDER, KIND_SPECS, type EntityKind } from '../kinds';
-import { countChanges, isEmpty, type ChangeSet, type EntityChange, type FolderChange } from '../mirror/diff';
+import { changeSignature, countChanges, isEmpty, type ChangeSet, type EntityChange, type FolderChange } from '../mirror/diff';
 import { entityLabel } from '../mirror/layout';
 import type { Overlay } from '../mirror/model';
-import { entityKey, writeState, type MirrorState } from '../mirror/state';
+import { withMirrorLock } from '../mirror/lock';
+import { entityKey, writeState, type MirrorState, type PushedDoc } from '../mirror/state';
+import { canonicalJson } from '../serialize/canonical';
 import { docName, toApiBody, type EntityDoc } from '../serialize/entityFiles';
 import { collectTriggerReferences, templateType, type IdLookup } from '../serialize/references';
 import { GtmError, type ApiEntity, type BulkEntity, type RemoteSnapshot } from '../types';
@@ -18,6 +20,11 @@ export interface PushOptions {
   readonly onProgress?: (message: string) => void;
   /** Unsaved editor buffers, so the pre-push refresh never overwrites them. */
   readonly overlay?: Overlay;
+  /**
+   * `changeSignature` of the change set the user confirmed. If the files changed since (an agent or
+   * another window saved something), nothing is sent.
+   */
+  readonly expected?: string;
 }
 
 export interface PushResult {
@@ -44,8 +51,10 @@ interface MutableLookup {
 }
 
 interface Applied {
-  readonly forced: Set<string>;
-  readonly hints: Map<string, string>;
+  /** `kind:id` → base + content sent. */
+  readonly pushed: Map<string, PushedDoc>;
+  /** New entities sent but not matched to an id in the response: base → content sent. */
+  readonly created: Map<string, string>;
 }
 
 /**
@@ -53,9 +62,14 @@ interface Applied {
  * Remote-only changes are merged in before anything is sent, so a push never undoes them.
  */
 export async function pushWorkspace(root: string, api: GtmApi, initial: MirrorState, options: PushOptions = {}): Promise<PushResult> {
+  return withMirrorLock(root, 'push', () => pushLocked(root, api, initial, options));
+}
+
+async function pushLocked(root: string, api: GtmApi, initial: MirrorState, options: PushOptions): Promise<PushResult> {
   const progress = options.onProgress ?? (() => undefined);
-  assertReady(await workingStatus(root, initial), initial);
-  if (isEmpty((await workingStatus(root, initial)).changes)) return { pushed: 0 };
+  const first = await workingStatus(root, initial);
+  assertReady(first, initial);
+  if (isEmpty(first.changes)) return { pushed: 0 };
 
   progress('Checking GTM for changes before pushing…');
   const pulled = await refreshMirror(root, api, initial, { overlay: options.overlay, onProgress: progress });
@@ -63,12 +77,17 @@ export async function pushWorkspace(root: string, api: GtmApi, initial: MirrorSt
   const status = await workingStatus(root, state);
   if (state.conflicts.length || state.gtmConflicts.length) {
     throw new PushBlockedError('GTM had changes that conflict with yours. Nothing was pushed. Resolve these, then Push again:', [
-      ...state.conflicts.map((base) => `${base}: changed locally and in GTM (Keep Mine / Take Theirs)`),
+      ...state.conflicts.map((base) => (state.deletedRemotely.includes(base) ? conflictReason(state, base) : `${base}: changed locally and in GTM (Keep Mine / Take Theirs)`)),
       ...state.gtmConflicts.map((item) => `${item.base}: GTM merge conflict with the latest version (Keep Workspace / Take Latest)`),
     ]);
   }
   assertReady(status, state);
   if (isEmpty(status.changes)) return { pushed: 0, before: pulled };
+  if (options.expected !== undefined && changeSignature(status.changes) !== options.expected) {
+    throw new PushBlockedError('Your files changed after you confirmed the push. Nothing was sent. Review the changes and push again:', [
+      'Something saved files in this folder in the meantime (an editor, an AI agent, another window).',
+    ]);
+  }
 
   progress('Checking GTM for changes made since your last pull…');
   const before = await api.fetchSnapshot(state.workspace, state.container.usageContext);
@@ -76,7 +95,7 @@ export async function pushWorkspace(root: string, api: GtmApi, initial: MirrorSt
   if (conflicts.length) throw new PushBlockedError('GTM changed since your last pull. Run Pull, resolve, then Push again:', conflicts);
 
   const lookup = buildLookup(status.local.docs, status.changes, state, before);
-  const applied: Applied = { forced: new Set(), hints: new Map() };
+  const applied: Applied = { pushed: new Map(), created: new Map() };
   const total = countChanges(status.changes);
   let failure: unknown;
   try {
@@ -85,36 +104,58 @@ export async function pushWorkspace(root: string, api: GtmApi, initial: MirrorSt
   } catch (error: unknown) {
     failure = error;
   }
+  // Only a push that went through may adopt unmatched local files; a failed one adopts nothing.
+  const created = failure ? new Map<string, string>() : applied.created;
+  // Record what was sent before refreshing: if the refresh fails, the next pull finishes the job.
+  const pending: MirrorState = {
+    ...state,
+    pendingPush: { pushed: Object.fromEntries(applied.pushed), created: Object.fromEntries(created) },
+  };
+  await writeState(root, pending);
 
-  progress('Refreshing from GTM…');
-  // Status before snapshot: a change landing in between is picked up by the next check.
-  const remoteStatus = await api.getWorkspaceStatus(state.workspace);
-  const after = await api.fetchSnapshot(state.workspace, state.container.usageContext);
-  const applied_ = await applySnapshot(root, state, after, { forceRemote: applied.forced, pathHints: applied.hints, adoptPushed: true, overlay: options.overlay });
-  const refreshed: MirrorState = { ...applied_.state, remote: { ...state.remote, status: statusSignature(remoteStatus) } };
-  await writeState(root, refreshed);
-  const refresh = { ...applied_, state: refreshed };
-  if (failure) {
-    const message = failure instanceof Error ? failure.message : String(failure);
-    throw new GtmError(`Push stopped: ${message}\nAnything already applied is now in sync; the rest is still a local change.`);
+  let refresh: PullResult | undefined;
+  let refreshError: unknown;
+  try {
+    progress('Refreshing from GTM…');
+    // Status before snapshot: a change landing in between is picked up by the next check.
+    const remoteStatus = await api.getWorkspaceStatus(state.workspace);
+    const after = await api.fetchSnapshot(state.workspace, state.container.usageContext);
+    const applied_ = await applySnapshot(root, pending, after, { overlay: options.overlay });
+    const refreshed: MirrorState = { ...applied_.state, remote: { ...state.remote, status: statusSignature(remoteStatus) } };
+    await writeState(root, refreshed);
+    refresh = { ...applied_, state: refreshed };
+  } catch (error: unknown) {
+    refreshError = error;
   }
+
+  const refreshNote = refreshError ? `\nRefreshing from GTM afterwards failed (${message(refreshError)}); run Pull to finish, nothing is lost.` : '';
+  if (failure) {
+    throw new GtmError(`Push stopped: ${message(failure)}\nAnything already applied is in sync; the rest is still a local change.${refreshNote}`);
+  }
+  if (refreshError) throw new GtmError(`Pushed ${total} change(s) to GTM.${refreshNote}`);
   return { pushed: total, before: pulled, refresh };
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function assertReady(status: Awaited<ReturnType<typeof workingStatus>>, state: MirrorState): void {
   assertPushable(
     status.problems.map((problem) => `${problem.path}: ${problem.message}`),
     status.issues.filter((issue) => issue.severity === 'error').map((issue) => `${issue.path}: ${issue.message}`),
-    state.conflicts,
+    state.conflicts.map((base) => conflictReason(state, base)),
   );
 }
 
+function conflictReason(state: MirrorState, base: string): string {
+  return state.deletedRemotely.includes(base)
+    ? `${base}: deleted in GTM, edited locally (Keep Mine recreates it / Take Theirs deletes it)`
+    : `${base}: unresolved conflict (Keep Mine / Take Theirs)`;
+}
+
 function assertPushable(problems: string[], errors: string[], conflicts: readonly string[]): void {
-  const reasons = [
-    ...problems,
-    ...errors,
-    ...conflicts.map((base) => `${base}: unresolved conflict (Keep Mine / Take Theirs)`),
-  ];
+  const reasons = [...problems, ...errors, ...conflicts];
   if (reasons.length) throw new PushBlockedError('Push blocked:', reasons);
 }
 
@@ -185,10 +226,8 @@ function fingerprintOf(change: EntityChange, state: MirrorState): string | undef
   return state.entities[change.previousBase ?? change.base]?.fingerprint;
 }
 
-function markApplied(applied: Applied, kind: EntityKind, id: string, base: string): void {
-  const key = entityKey(kind, id);
-  applied.forced.add(key);
-  applied.hints.set(key, base);
+function markApplied(applied: Applied, kind: EntityKind, id: string, change: EntityChange): void {
+  applied.pushed.set(entityKey(kind, id), { base: change.base, content: canonicalJson((change.local as EntityDoc).data) });
 }
 
 async function createTemplates(api: GtmApi, state: MirrorState, changes: ChangeSet, lookup: MutableLookup, applied: Applied, progress: (m: string) => void) {
@@ -196,7 +235,7 @@ async function createTemplates(api: GtmApi, state: MirrorState, changes: ChangeS
     progress(`Creating ${entityLabel('template', docName(change.local as EntityDoc))}…`);
     const created = await api.createEntity(state.workspace, 'template', bodyFor(change, lookup, {}));
     lookup.templateTypes.set(String(created.name), templateType(state.container.containerId, created));
-    markApplied(applied, 'template', String(created.templateId), change.base);
+    markApplied(applied, 'template', String(created.templateId), change);
   }
 }
 
@@ -281,10 +320,11 @@ function recordBulkResults(
   }
   for (const { change } of added) {
     const id = returned.get(`${change.kind}\u0000${docName(change.local as EntityDoc)}`);
-    if (id) markApplied(applied, change.kind, id, change.base);
+    if (id) markApplied(applied, change.kind, id, change);
+    else applied.created.set(change.base, canonicalJson((change.local as EntityDoc).data));
   }
   for (const change of changes.entities.filter((item) => item.type === 'updated')) {
-    markApplied(applied, change.kind, change.id as string, change.base);
+    markApplied(applied, change.kind, change.id as string, change);
   }
 }
 
@@ -321,12 +361,12 @@ async function pushSequential(
         const created = await api.createEntity(ref, kind, bodyFor(change, lookup, {}));
         const id = String(created[KIND_SPECS[kind].idField]);
         if (kind === 'trigger') lookup.triggerIds.set(String(created.name), id);
-        markApplied(applied, kind, id, change.base);
+        markApplied(applied, kind, id, change);
       } else {
         progress(`Updating ${label}…`);
         const id = change.id as string;
         await api.updateEntity(ref, kind, id, bodyFor(change, lookup, idPatch(kind, id)), fingerprintOf(change, state));
-        markApplied(applied, kind, id, change.base);
+        markApplied(applied, kind, id, change);
       }
     }
   }

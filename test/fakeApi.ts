@@ -144,6 +144,11 @@ export class FakeGtm implements GtmApi {
     return { workspaceChange, mergeConflict: structuredClone(this.mergeConflicts) };
   }
 
+  async liveVersionId(): Promise<string | undefined> {
+    this.calls.push('liveVersion');
+    return [...this.versions].reverse().find((version) => version.published)?.id;
+  }
+
   async latestVersionId(): Promise<string | undefined> {
     this.calls.push('latestVersion');
     return this.versions.at(-1)?.id;

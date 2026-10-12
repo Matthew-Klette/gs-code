@@ -121,6 +121,11 @@
         "command": "gsCode.gtmTakeLatest",
         "title": "Resolve GTM Merge Conflict: Take Latest Version",
         "category": "GS Code"
+      },
+      {
+        "command": "gsCode.switchWorkspace",
+        "title": "Switch Workspace…",
+        "category": "GS Code"
       }
     ],
     "menus": {
@@ -149,6 +154,11 @@
           "command": "gsCode.publish",
           "when": "scmProvider == gtm && config.gsCode.allowPublish",
           "group": "1_publish@2"
+        },
+        {
+          "command": "gsCode.switchWorkspace",
+          "when": "scmProvider == gtm",
+          "group": "2_misc@0"
         },
         {
           "command": "gsCode.openInGtm",

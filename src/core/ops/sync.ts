@@ -3,13 +3,24 @@ import type { GtmApi } from '../api';
 import { KIND_ORDER, KIND_SPECS, type EntityKind } from '../kinds';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { allocateBase, MERGE_DIR } from '../mirror/layout';
+import { allocateBase, MERGE_DIR, STATE_DIR } from '../mirror/layout';
+import { withMirrorLock } from '../mirror/lock';
 import { writeDoc, type Overlay } from '../mirror/model';
 import { toLocalData } from '../serialize/entityFiles';
 import { buildRefContext } from '../serialize/references';
 import { entityKey, writeState, type GtmConflict, type MirrorState } from '../mirror/state';
 import { canonicalJson } from '../serialize/canonical';
-import { GtmError, type ApiChange, type ApiEntity, type ApiMergeConflict, type RemoteSnapshot, type WorkspaceInfo, type WorkspaceStatus } from '../types';
+import {
+  GtmError,
+  isWorkspaceGoneStatus,
+  WorkspaceGoneError,
+  type ApiChange,
+  type ApiEntity,
+  type ApiMergeConflict,
+  type RemoteSnapshot,
+  type WorkspaceInfo,
+  type WorkspaceStatus,
+} from '../types';
 import { applySnapshot, type PullResult } from './pull';
 
 export interface RefreshOptions {
@@ -18,6 +29,13 @@ export interface RefreshOptions {
   /** Unsaved editor buffers; they count as local edits and are never overwritten. */
   readonly overlay?: Overlay;
   readonly onProgress?: (message: string) => void;
+  /**
+   * Bring the workspace up to a newer container version (`workspaces.sync`). That writes to GTM, so
+   * only explicit actions (Pull, before Create Version) ask for it; background checks never do.
+   */
+  readonly sync?: boolean;
+  /** How long to wait for another process working on this folder (0 = skip this round). */
+  readonly lockWaitMs?: number;
 }
 
 export interface RefreshResult {
@@ -27,9 +45,15 @@ export interface RefreshResult {
   readonly pull?: PullResult;
   /** Set when the workspace was brought up to a newer container version. */
   readonly syncedTo?: string;
-  /** Set when the mirrored workspace was gone and the mirror moved to another one. */
+  /** Set when the mirror moved to another workspace (Switch Workspace). */
   readonly movedTo?: WorkspaceInfo;
+  /** A newer container version exists that this workspace was not synced to. */
+  readonly behind?: string;
+  /** Why a requested sync did not happen (e.g. no permission to update the workspace). */
+  readonly syncSkipped?: string;
 }
+
+const NO_VERSION = '0';
 
 /** Stable hash of a `workspaces.getStatus` response. Every entity edit changes it (verified live). */
 export function statusSignature(status: WorkspaceStatus): string {
@@ -40,72 +64,125 @@ export function statusSignature(status: WorkspaceStatus): string {
  * Bring the mirror up to date with GTM, cheaply when nothing changed.
  *
  * 1. `getStatus` + `version_headers:latest` (2 requests): has anything changed?
- * 2. A newer container version exists → `workspaces.sync` so the workspace itself catches up
- *    (GTM merge conflicts are recorded, never auto-resolved).
+ * 2. A newer container version exists → recorded as `behind`. Only with `sync` is the workspace
+ *    brought up to it (`workspaces.sync`; GTM merge conflicts are recorded, never auto-resolved).
  * 3. Only if something changed: the full pull (~10 requests) with the usual three-way merge,
  *    so local edits, including unsaved editor buffers, are never overwritten.
  *
  * The status is read before the snapshot, so an edit that lands in between is caught by the next check.
+ * A workspace that no longer exists raises `WorkspaceGoneError`; the mirror never guesses a replacement.
  */
 export async function refreshMirror(root: string, api: GtmApi, initial: MirrorState, options: RefreshOptions = {}): Promise<RefreshResult> {
-  const progress = options.onProgress ?? (() => undefined);
-  let state = initial;
-  let movedTo: WorkspaceInfo | undefined;
+  return withMirrorLock(root, 'pull', () => refreshLocked(root, api, initial, options), options.lockWaitMs);
+}
 
-  let status: WorkspaceStatus;
-  try {
-    status = await api.getWorkspaceStatus(state.workspace);
-  } catch (error: unknown) {
-    if (!(error instanceof GtmError) || error.status !== 404) throw error;
-    progress(`Workspace "${state.workspace.name}" no longer exists in GTM (it was probably versioned or deleted). Moving to a replacement…`);
-    movedTo = await followWorkspace(api, state);
-    state = { ...state, workspace: movedTo, remote: undefined };
-    await writeState(root, state);
-    status = await api.getWorkspaceStatus(state.workspace);
-  }
+async function refreshLocked(root: string, api: GtmApi, initial: MirrorState, options: RefreshOptions, movedTo?: WorkspaceInfo): Promise<RefreshResult> {
+  const progress = options.onProgress ?? (() => undefined);
+  const state = initial;
+  let status = await statusOrGone(api, state);
 
   const latest = await api.latestVersionId(state.container.accountId, state.container.containerId);
+  const known = state.remote?.versionId;
   let syncedTo: string | undefined;
-  if (latest && latest !== state.remote?.versionId) {
-    progress(`Bringing workspace "${state.workspace.name}" up to container version ${latest}…`);
-    const sync = await api.syncWorkspace(state.workspace);
-    if (sync.syncError) throw new GtmError(`GTM could not sync workspace "${state.workspace.name}" to version ${latest}. Open it in Tag Manager to see why.`);
-    syncedTo = latest;
-    status = await api.getWorkspaceStatus(state.workspace);
+  let syncSkipped: string | undefined;
+  // A new mirror adopts the latest version as its starting point instead of syncing on its first check.
+  let behind = latest && known && latest !== known ? latest : undefined;
+  if (behind && options.sync) {
+    progress(`Bringing workspace "${state.workspace.name}" up to container version ${behind}…`);
+    try {
+      const sync = await api.syncWorkspace(state.workspace);
+      if (sync.syncError) throw new GtmError(`GTM could not sync workspace "${state.workspace.name}" to version ${behind}. Open it in Tag Manager to see why.`);
+      syncedTo = behind;
+      behind = undefined;
+      status = await api.getWorkspaceStatus(state.workspace);
+    } catch (error: unknown) {
+      if (!(error instanceof GtmError) || error.status !== 403) throw error;
+      syncSkipped = `no permission to update workspace "${state.workspace.name}" to version ${behind}; pulled without syncing`;
+      progress(syncSkipped);
+    }
   }
+  // '0' = the container had no versions yet, so the first version published later counts as newer.
+  const versionId = syncedTo ?? known ?? latest ?? NO_VERSION;
 
   const signature = statusSignature(status);
   const waitingOnSave = state.deferred.length > 0 && !state.deferred.some((file) => options.overlay?.has(file));
   const changed = options.force || movedTo !== undefined || syncedTo !== undefined || waitingOnSave || signature !== state.remote?.status;
-  if (!changed) return { state, pulled: false };
+  if (!changed) {
+    if (behind === state.remote?.behind && versionId === known) return { state, pulled: false, behind, syncSkipped };
+    const marked: MirrorState = { ...state, remote: { ...state.remote, versionId, behind } };
+    await writeState(root, marked);
+    return { state: marked, pulled: false, behind, syncSkipped };
+  }
 
   progress('Pulling changes from GTM…');
   const snapshot = await api.fetchSnapshot(state.workspace, state.container.usageContext);
   const pull = await applySnapshot(root, state, snapshot, { overlay: options.overlay });
   const next: MirrorState = {
     ...pull.state,
-    remote: { status: signature, versionId: latest ?? state.remote?.versionId },
+    remote: { status: signature, versionId, behind },
     gtmConflicts: toGtmConflicts(status.mergeConflict, pull.state),
   };
   await writeState(root, next);
-    await writeMergeCopies(root, next, status.mergeConflict, snapshot);
-  return { state: next, pulled: true, pull: { ...pull, state: next }, syncedTo, movedTo };
+  await writeMergeCopies(root, next, status.mergeConflict, snapshot);
+  return { state: next, pulled: true, pull: { ...pull, state: next }, syncedTo, movedTo, behind, syncSkipped };
+}
+
+/** `getStatus`, turning "workspace gone" into `WorkspaceGoneError` with the workspaces to choose from. */
+async function statusOrGone(api: GtmApi, state: MirrorState): Promise<WorkspaceStatus> {
+  try {
+    return await api.getWorkspaceStatus(state.workspace);
+  } catch (error: unknown) {
+    if (!isWorkspaceGoneStatus(error)) throw error;
+    const candidates = await api.listWorkspaces(state.container.accountId, state.container.containerId);
+    // Still listed: a different problem (permissions, a typo'd id); show the real error.
+    if (candidates.some((workspace) => workspace.workspaceId === state.workspace.workspaceId)) throw error;
+    throw new WorkspaceGoneError(state.workspace, candidates);
+  }
+}
+
+export interface SwitchResult extends RefreshResult {
+  /** Copy of the working files taken before switching, in case the new workspace replaces some. */
+  readonly backup: string;
 }
 
 /**
- * The mirrored workspace is gone (GTM deletes a workspace when a version is created from it).
- * Reuse a workspace with the same name, or create one: it starts from the latest version,
- * and entity ids are container-wide, so the three-way merge carries on as before.
+ * Point the mirror at another workspace (after the old one was versioned or deleted, or by choice).
+ * Working files are backed up first; then a full three-way pull keeps your unpushed edits.
  */
-export async function followWorkspace(api: GtmApi, state: MirrorState): Promise<WorkspaceInfo> {
+export async function switchWorkspace(root: string, api: GtmApi, state: MirrorState, target: WorkspaceInfo, options: RefreshOptions = {}): Promise<SwitchResult> {
+  return withMirrorLock(root, 'switch workspace', async () => {
+    const backup = await backupWorkingFiles(root);
+    const moved: MirrorState = { ...state, workspace: target, remote: undefined, gtmConflicts: [] };
+    await writeState(root, moved);
+    const result = await refreshLocked(root, api, moved, { ...options, force: true }, target);
+    return { ...result, backup };
+  }, options.lockWaitMs);
+}
+
+export const BACKUP_DIR = `${STATE_DIR}/backups`;
+
+async function backupWorkingFiles(root: string): Promise<string> {
+  const target = path.join(root, BACKUP_DIR, new Date().toISOString().replace(/[:.]/g, '-'));
+  await fs.mkdir(target, { recursive: true });
+  for (const entry of await fs.readdir(root)) {
+    if (entry === STATE_DIR) continue;
+    await fs.cp(path.join(root, entry), path.join(target, entry), { recursive: true });
+  }
+  return path.relative(root, target).split(path.sep).join('/');
+}
+
+/**
+ * After Create Version: GTM deleted the workspace and returned no replacement (it only does when the
+ * versioned workspace was the last one). Create a fresh one with the same name; never adopt someone
+ * else's workspace that happens to share it.
+ */
+export async function replacementWorkspace(api: GtmApi, state: MirrorState): Promise<WorkspaceInfo> {
   const { accountId, containerId } = state.container;
-  const existing = (await api.listWorkspaces(accountId, containerId)).find((workspace) => workspace.name === state.workspace.name);
-  if (existing) return existing;
   try {
     return await api.createWorkspace(accountId, containerId, state.workspace.name, state.workspace.description);
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
-    throw new GtmError(`Workspace "${state.workspace.name}" no longer exists in GTM and a replacement could not be created: ${reason}`);
+    throw new WorkspaceGoneError(state.workspace, await api.listWorkspaces(accountId, containerId).catch(() => []), reason);
   }
 }
 

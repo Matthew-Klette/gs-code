@@ -1,10 +1,12 @@
 import type { GtmApi } from '../api';
 import { countChanges, isEmpty } from '../mirror/diff';
+import { withMirrorLock } from '../mirror/lock';
+import type { Overlay } from '../mirror/model';
 import { writeState, type MirrorState } from '../mirror/state';
-import { GtmError, parseWorkspacePath } from '../types';
+import { GtmError, parseWorkspacePath, WorkspaceGoneError } from '../types';
 import { workingStatus } from './plan';
 import { applySnapshot } from './pull';
-import { followWorkspace } from './sync';
+import { replacementWorkspace, statusSignature } from './sync';
 
 export class ProtectedContainerError extends GtmError {
   constructor(publicId: string) {
@@ -28,6 +30,8 @@ export interface VersionRequest {
   readonly protectedContainers: readonly string[];
   readonly publish: boolean;
   readonly onProgress?: (message: string) => void;
+  /** Unsaved editor buffers, so the pull after versioning never writes under them. */
+  readonly overlay?: Overlay;
 }
 
 export interface VersionResult {
@@ -42,8 +46,12 @@ export interface VersionResult {
  * GTM's replacement or to a workspace with the same name (reused or created).
  */
 export async function createVersion(root: string, api: GtmApi, state: MirrorState, request: VersionRequest): Promise<VersionResult> {
-  const progress = request.onProgress ?? (() => undefined);
   assertNotProtected(state, request.protectedContainers);
+  return withMirrorLock(root, 'create version', () => createVersionLocked(root, api, state, request));
+}
+
+async function createVersionLocked(root: string, api: GtmApi, state: MirrorState, request: VersionRequest): Promise<VersionResult> {
+  const progress = request.onProgress ?? (() => undefined);
   const status = await workingStatus(root, state);
   if (state.conflicts.length) throw new GtmError('Resolve conflicts before creating a version.');
   if (state.gtmConflicts.length) {
@@ -51,6 +59,16 @@ export async function createVersion(root: string, api: GtmApi, state: MirrorStat
   }
   if (!isEmpty(status.changes)) {
     throw new GtmError(`You have ${countChanges(status.changes)} unpushed change(s). Push or discard them before creating a version.`);
+  }
+
+  if (state.remote?.behind) {
+    throw new GtmError(`Container version ${state.remote.behind} was published after this workspace was last synced. Pull first (it brings the workspace up to date), review, then create the version.`);
+  }
+  // The version contains whatever is in the GTM workspace at this moment, so it must be exactly what you reviewed.
+  progress('Checking GTM for changes since your last pull…');
+  const current = statusSignature(await api.getWorkspaceStatus(state.workspace));
+  if (!state.remote?.status || current !== state.remote.status) {
+    throw new GtmError('The workspace changed in GTM since your last pull (a teammate or the GTM UI). Nothing was versioned. Pull, review the changes, then try again.');
   }
 
   progress('Creating version…');
@@ -66,8 +84,14 @@ export async function createVersion(root: string, api: GtmApi, state: MirrorStat
 
   let nextState: MirrorState;
   try {
-    nextState = await repointWorkspace(root, api, state, version.newWorkspacePath, versionId);
+    nextState = await repointWorkspace(root, api, state, version.newWorkspacePath, versionId, request.overlay);
   } catch (error: unknown) {
+    if (error instanceof WorkspaceGoneError) {
+      throw new GtmError(
+        `Version ${versionId} was created${publishedNote}, but switching this folder to a new workspace failed: ${error.reason ?? 'no replacement'} ` +
+          `(free accounts allow 3 workspaces). Run "Switch Workspace…" to pick the one this folder should follow.`,
+      );
+    }
     throw new GtmError(
       `Version ${versionId} was created${publishedNote}, but switching this folder to a new workspace failed: ${message(error)}. ` +
         `${publishError ? `Publishing also failed: ${publishError}. ` : ''}Open a fresh mirror ("Open Workspace…").`,
@@ -89,6 +113,11 @@ export async function publishVersion(api: GtmApi, state: MirrorState, versionId:
 async function publishOrError(api: GtmApi, state: MirrorState, versionId: string, progress: (message: string) => void): Promise<string | undefined> {
   progress(`Publishing version ${versionId}…`);
   try {
+    // Never roll the site back: if a newer version went live in the meantime, stop.
+    const live = await api.liveVersionId(state.container.accountId, state.container.containerId);
+    if (live && Number(live) > Number(versionId)) {
+      return `version ${live} is newer and already live; publishing ${versionId} would roll it back`;
+    }
     const published = await api.publishVersion(state.container.accountId, state.container.containerId, versionId);
     return published.compilerError ? 'GTM reported a compiler error' : undefined;
   } catch (error: unknown) {
@@ -100,12 +129,19 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function repointWorkspace(root: string, api: GtmApi, state: MirrorState, newWorkspacePath: string | undefined, versionId: string): Promise<MirrorState> {
+async function repointWorkspace(
+  root: string,
+  api: GtmApi,
+  state: MirrorState,
+  newWorkspacePath: string | undefined,
+  versionId: string,
+  overlay?: Overlay,
+): Promise<MirrorState> {
   // GTM only creates a replacement when the versioned workspace was the last one (verified live 2026-10-12).
-  const workspace = newWorkspacePath ? await api.getWorkspace(parseWorkspacePath(newWorkspacePath)) : await followWorkspace(api, state);
+  const workspace = newWorkspacePath ? await api.getWorkspace(parseWorkspacePath(newWorkspacePath)) : await replacementWorkspace(api, state);
   // The new workspace starts from the version just created; its status is unknown, so the next check pulls.
   const moved: MirrorState = { ...state, workspace, remote: { versionId }, gtmConflicts: [] };
   await writeState(root, moved);
   const snapshot = await api.fetchSnapshot(workspace, state.container.usageContext);
-  return (await applySnapshot(root, moved, snapshot)).state;
+  return (await applySnapshot(root, moved, snapshot, { overlay })).state;
 }

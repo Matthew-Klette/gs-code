@@ -4,14 +4,14 @@ import * as vscode from 'vscode';
 import type { GtmApi } from '../core/api';
 import { parseClientSecretJson, signIn, type CredentialStore } from '../core/auth/oauth';
 import { describeChanges, describeConflicts, describePull } from '../core/format';
-import { countChanges, isEmpty } from '../core/mirror/diff';
+import { changeSignature, countChanges, isEmpty } from '../core/mirror/diff';
 import { safeFileName } from '../core/mirror/layout';
 import { readState } from '../core/mirror/state';
 import { assertNotProtected, createVersion } from '../core/ops/publish';
 import { pushWorkspace, type PushStrategy } from '../core/ops/push';
-import { refreshMirror, resolveGtmConflict, type GtmResolution, type RefreshResult } from '../core/ops/sync';
+import { refreshMirror, resolveGtmConflict, switchWorkspace, type GtmResolution, type RefreshResult } from '../core/ops/sync';
 import { discardChanges, initMirror, resolveConflict } from '../core/ops/workspace';
-import type { ContainerInfo, WorkspaceInfo } from '../core/types';
+import { WorkspaceGoneError, type ContainerInfo, type WorkspaceInfo } from '../core/types';
 import { FileCredentialStore } from '../cli/fileStore';
 import { autoPullConfig, dirtyOverlay, type MirrorController, type ResourceState } from './mirror';
 
@@ -53,8 +53,10 @@ async function run<T>(deps: CommandDeps, title: string, task: (report: (message:
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     deps.output.appendLine(`✖ ${title}: ${message}`);
-    void vscode.window.showErrorMessage(message.split('\n')[0] ?? message, 'Show Details').then((choice) => {
-      if (choice) deps.output.show();
+    const actions = error instanceof WorkspaceGoneError ? ['Switch Workspace…', 'Show Details'] : ['Show Details'];
+    void vscode.window.showErrorMessage(message.split('\n')[0] ?? message, ...actions).then((choice) => {
+      if (choice === 'Switch Workspace…') void vscode.commands.executeCommand('gsCode.switchWorkspace');
+      else if (choice) deps.output.show();
     });
     return undefined;
   }
@@ -89,6 +91,7 @@ export function registerCommands(deps: CommandDeps): vscode.Disposable[] {
     register('open', () => openWorkspace(deps)),
     register('refresh', async (arg) => (await pickController(deps, arg))?.refresh()),
     register('pull', (arg) => pull(deps, arg)),
+    register('switchWorkspace', (arg) => switchTo(deps, arg)),
     register('push', (arg) => push(deps, arg)),
     register('createVersion', (arg) => version(deps, arg, false)),
     register('publish', (arg) => version(deps, arg, true)),
@@ -184,11 +187,11 @@ async function openWorkspace(deps: CommandDeps): Promise<void> {
   }
 }
 
-async function pickWorkspace(deps: CommandDeps, container: ContainerInfo): Promise<WorkspaceInfo | undefined> {
+async function pickWorkspace(deps: CommandDeps, container: ContainerInfo, placeHolder = 'Workspace'): Promise<WorkspaceInfo | undefined> {
   const workspaces = await run(deps, 'Loading workspaces…', () => deps.api.listWorkspaces(container.accountId, container.containerId));
   if (!workspaces) return undefined;
   const CREATE = { label: '$(add) Create new workspace…', item: undefined };
-  const picked = await vscode.window.showQuickPick([CREATE, ...workspaces.map((item) => ({ label: item.name, description: item.workspaceId, item }))], { placeHolder: 'Workspace' });
+  const picked = await vscode.window.showQuickPick([CREATE, ...workspaces.map((item) => ({ label: item.name, description: item.workspaceId, item }))], { placeHolder });
   if (!picked) return undefined;
   if (picked.item) return picked.item;
   const name = await vscode.window.showInputBox({ prompt: 'New workspace name', validateInput: (value) => (value.trim() ? undefined : 'Required') });
@@ -196,23 +199,50 @@ async function pickWorkspace(deps: CommandDeps, container: ContainerInfo): Promi
   return run(deps, `Creating workspace "${name}"…`, () => deps.api.createWorkspace(container.accountId, container.containerId, name.trim()));
 }
 
-/** Sync the workspace to the latest version if needed and pull (only when GTM changed, unless forced). */
-function refreshNow(deps: CommandDeps, controller: MirrorController, force: boolean, report?: (message: string) => void): Promise<RefreshResult> {
+/**
+ * Pull (only when GTM changed, unless forced). With `sync`, also bring the workspace up to a newer
+ * container version: that writes to GTM, so only explicit actions ask for it.
+ */
+function refreshNow(deps: CommandDeps, controller: MirrorController, force: boolean, report?: (message: string) => void, sync = false): Promise<RefreshResult> {
   return controller.exclusive(async () =>
-    refreshMirror(controller.root, deps.api, await readState(controller.root), { force, overlay: dirtyOverlay(controller.root), onProgress: report }),
+    refreshMirror(controller.root, deps.api, await readState(controller.root), { force, sync, overlay: dirtyOverlay(controller.root), onProgress: report }),
   );
 }
 
 async function pull(deps: CommandDeps, arg?: unknown): Promise<void> {
   const controller = await pickController(deps, arg);
   if (!controller?.state) return;
-  const result = await run(deps, `Pulling ${controller.label}…`, (report) => refreshNow(deps, controller, true, report));
+  const result = await run(deps, `Pulling ${controller.label}…`, (report) => refreshNow(deps, controller, true, report, true));
   if (!result) return;
   await controller.afterRefresh(result, 'command');
   const summary = result.pull ? describePull(result.pull) : 'already up to date';
   const blocked = describeConflicts(result.state);
   if (blocked.length) void vscode.window.showWarningMessage(`Pull: ${summary}. Resolve conflicts in the Source Control view.`);
-  else void vscode.window.showInformationMessage(`Pull: ${summary}${result.syncedTo ? ` (workspace synced to version ${result.syncedTo})` : ''}.`);
+  else void vscode.window.showInformationMessage(`Pull: ${summary}${result.syncedTo ? ` (workspace synced to version ${result.syncedTo})` : ''}${result.syncSkipped ? ` (${result.syncSkipped})` : ''}.`);
+}
+
+/** Follow another workspace: after yours was versioned or deleted, or just by choice. */
+async function switchTo(deps: CommandDeps, arg?: unknown): Promise<void> {
+  const controller = await pickController(deps, arg);
+  const state = controller?.state;
+  if (!controller || !state) return;
+  const workspace = await pickWorkspace(deps, state.container, `Workspace this folder should follow (now "${state.workspace.name}")`);
+  if (!workspace) return;
+  const ok = await vscode.window.showWarningMessage(
+    `Follow workspace "${workspace.name}"? Your unpushed edits are kept, and the working files are backed up to .gtm/backups first.`,
+    { modal: true },
+    'Switch',
+  );
+  if (ok !== 'Switch') return;
+  const result = await run(deps, `Switching to "${workspace.name}"…`, (report) =>
+    controller.exclusive(async () =>
+      switchWorkspace(controller.root, deps.api, await readState(controller.root), workspace, { overlay: dirtyOverlay(controller.root), onProgress: report }),
+    ),
+  );
+  if (!result) return;
+  await controller.afterRefresh(result, 'command');
+  controller.applySettings(autoPullConfig());
+  void vscode.window.showInformationMessage(`Now following "${workspace.name}". Backup of the previous files: ${result.backup}`);
 }
 
 /** Pull before Push / Create Version; returns false (and says why) if conflicts must be settled first. */
@@ -245,6 +275,8 @@ async function push(deps: CommandDeps, arg?: unknown): Promise<void> {
     return;
   }
   const lines = describeChanges(status.changes);
+  // Pin exactly what the dialog shows: if an agent or another window saves files meanwhile, nothing is sent.
+  const expected = changeSignature(status.changes);
   const ok = await vscode.window.showWarningMessage(
     `Push ${countChanges(status.changes)} change(s) to ${state.container.publicId} / "${state.workspace.name}"?`,
     { modal: true, detail: preview(lines) },
@@ -253,7 +285,7 @@ async function push(deps: CommandDeps, arg?: unknown): Promise<void> {
   if (ok !== 'Push') return;
   const result = await run(deps, `Pushing to ${controller.label}…`, (report) =>
     controller.exclusive(async () =>
-      pushWorkspace(controller.root, deps.api, await readState(controller.root), { strategy: config().pushStrategy, onProgress: report, overlay: dirtyOverlay(controller.root) }),
+      pushWorkspace(controller.root, deps.api, await readState(controller.root), { strategy: config().pushStrategy, expected, onProgress: report, overlay: dirtyOverlay(controller.root) }),
     ),
   );
   await controller.refresh();
@@ -278,6 +310,22 @@ async function version(deps: CommandDeps, arg: unknown, publish: boolean): Promi
     return;
   }
   if (!(await refreshBeforeWrite(deps, controller, publish ? 'publishing' : 'creating a version'))) return;
+  const behind = controller.state?.remote?.behind;
+  if (behind) {
+    const update = await vscode.window.showWarningMessage(
+      `Container version ${behind} was published after this workspace was last updated. Bring the workspace up to date first?`,
+      { modal: true, detail: 'This merges the published changes into the workspace (GTM "Update"). Conflicts, if any, are shown in Source Control.' },
+      'Update Workspace',
+    );
+    if (update !== 'Update Workspace') return;
+    const synced = await run(deps, 'Updating the workspace…', (report) => refreshNow(deps, controller, true, report, true));
+    if (!synced) return;
+    await controller.afterRefresh(synced, 'command');
+    if (describeConflicts(synced.state).length) {
+      void vscode.window.showWarningMessage('Updating the workspace produced conflicts. Resolve them in Source Control, then try again.');
+      return;
+    }
+  }
   const name = await vscode.window.showInputBox({ prompt: 'Version name', value: `${state.workspace.name} (${new Date().toISOString().slice(0, 10)})` });
   if (name === undefined) return;
   const notes = await vscode.window.showInputBox({ prompt: 'Version notes (optional)' });
@@ -294,7 +342,7 @@ async function version(deps: CommandDeps, arg: unknown, publish: boolean): Promi
   }
   const result = await run(deps, publish ? 'Publishing…' : 'Creating version…', (report) =>
     controller.exclusive(async () =>
-      createVersion(controller.root, deps.api, await readState(controller.root), { name, notes, publish, protectedContainers, onProgress: report }),
+      createVersion(controller.root, deps.api, await readState(controller.root), { name, notes, publish, protectedContainers, onProgress: report, overlay: dirtyOverlay(controller.root) }),
     ),
   );
   await controller.refresh();

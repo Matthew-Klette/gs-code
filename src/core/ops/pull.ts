@@ -14,22 +14,23 @@ import {
   type MirrorModel,
   type Overlay,
 } from '../mirror/model';
-import { entityKey, writeState, type FolderEntry, type IndexEntry, type MirrorState } from '../mirror/state';
+import { entityKey, writeState, type FolderEntry, type IndexEntry, type MirrorState, type PushedDoc } from '../mirror/state';
 import { canonicalJson } from '../serialize/canonical';
 import { docName, renderFiles, toLocalData, type EntityDoc } from '../serialize/entityFiles';
 import { buildRefContext } from '../serialize/references';
 import type { ApiEntity, RemoteSnapshot } from '../types';
 
 export interface ApplyOptions {
-  /** `kind:id` keys whose remote version wins unconditionally (just pushed). */
-  readonly forceRemote?: ReadonlySet<string>;
-  /** `kind:id` → base path to use for that entity (new or renamed locally). */
-  readonly pathHints?: ReadonlyMap<string, string>;
   /**
-   * After a push: a new remote entity that matches an unindexed local file
-   * (same name, or same content for unnamed kinds) is that file, just created. Take the remote.
+   * Entities a push just sent (`kind:id` → base path + the content sent). GTM's copy replaces the
+   * file, unless the file changed again after it was sent: then the edit is kept on top.
    */
-  readonly adoptPushed?: boolean;
+  readonly pushed?: ReadonlyMap<string, PushedDoc>;
+  /**
+   * New entities a push created that could not be matched by id (unnamed kinds): base path →
+   * content sent. A new remote entity with that name (or content, for unnamed kinds) is that file.
+   */
+  readonly created?: ReadonlyMap<string, string>;
   /**
    * Unsaved editor buffers (mirror-relative path → text). They count as local edits and
    * their files are never written: a remote change to one becomes a conflict instead.
@@ -47,7 +48,7 @@ export interface PullResult {
   readonly removed: readonly string[];
   /** Changed both locally and in GTM. Local kept; remote copy in `.gtm/remote`. */
   readonly conflicts: readonly string[];
-  /** Changed locally but deleted in GTM. Kept as a local addition. */
+  /** Changed locally but deleted in GTM: a conflict (Keep Mine recreates it, Take Theirs deletes the file). */
   readonly orphaned: readonly string[];
   /** Whole files with unsaved edits whose remote update waits until they are saved. */
   readonly deferred: readonly string[];
@@ -80,8 +81,9 @@ export async function applySnapshot(
   await fs.rm(remoteRoot, { recursive: true, force: true });
 
   const ctx = buildRefContext(state.container.containerId, snapshot);
-  const forced = options.forceRemote ?? new Set<string>();
-  const hints = options.pathHints ?? new Map<string, string>();
+  // A push whose refresh failed left its record in the state; this pull finishes the job.
+  const pushed = new Map<string, PushedDoc>([...Object.entries(state.pendingPush?.pushed ?? {}), ...(options.pushed ?? [])]);
+  const created = new Map<string, string>([...Object.entries(state.pendingPush?.created ?? {}), ...(options.created ?? [])]);
   const indexByKey = new Map(Object.entries(state.entities).map(([base, entry]) => [entityKey(entry.kind, entry.id), base]));
   const taken = new Set([...local.docs.keys(), ...base.docs.keys(), ...brokenLocal].map((item) => item.toLowerCase()));
 
@@ -92,14 +94,19 @@ export async function applySnapshot(
   const conflictFingerprints: Record<string, string> = {};
   const indexedBases = new Set(Object.keys(state.entities));
   const claimed = new Set<string>();
+  // Only files this push created can be adopted, never an unrelated local file that happens to share a name.
   const adopt = (kind: EntityDoc['kind'], data: Record<string, unknown>): EntityDoc | undefined =>
     [...local.docs.values()].find(
       (doc) =>
         doc.kind === kind &&
+        created.has(doc.base) &&
         !indexedBases.has(doc.base) &&
         !claimed.has(doc.base) &&
         (KIND_SPECS[kind].named ? docName(doc) === data.name : canonicalJson(doc.data) === canonicalJson(data)),
     );
+  /** Was the file edited again after the push sent it? Then keep the edit; only the base moves. */
+  const editedSincePush = (doc: EntityDoc | undefined, sent: string | undefined) =>
+    sent !== undefined && !!doc && canonicalJson(doc.data) !== sent;
 
   for (const kind of KIND_ORDER) {
     if (kind === 'folder') continue;
@@ -110,8 +117,9 @@ export async function applySnapshot(
       seen.add(key);
       const indexedBase = indexByKey.get(key);
       const data = toLocalData(kind, entity, ctx);
-      const adopted = !indexedBase && !hints.has(key) ? adopt(kind, data) : undefined;
-      const target = hints.get(key) ?? indexedBase ?? adopted?.base ?? allocateBase(kind, String(entity.name ?? id), id, taken);
+      const sent = pushed.get(key);
+      const adopted = !indexedBase && !sent ? adopt(kind, data) : undefined;
+      const target = sent?.base ?? indexedBase ?? adopted?.base ?? allocateBase(kind, String(entity.name ?? id), id, taken);
       taken.add(target.toLowerCase());
       claimed.add(target);
       const remote: EntityDoc = { kind, base: target, data };
@@ -124,8 +132,12 @@ export async function applySnapshot(
         await removeDoc(baseRoot, original);
       }
 
-      const isForced = forced.has(key) || (adopted !== undefined && options.adoptPushed === true);
-      const decided = decide({ remote, original, mine, forced: isForced, broken: brokenLocal.has(target), isNew: !indexedBase });
+      const sentContent = sent?.content ?? (adopted ? created.get(adopted.base) : undefined);
+      const isPushed = sentContent !== undefined;
+      const keptEdit = isPushed && editedSincePush(mine, sentContent);
+      const decided = keptEdit
+        ? 'refresh-base'
+        : decide({ remote, original, mine, forced: isPushed, broken: brokenLocal.has(target), isNew: !indexedBase });
       // Never write under an open editor with unsaved edits: show the remote side as a conflict instead.
       const outcome = decided === 'take-remote' && !sameDoc(mine, remote) && isDirty(mine) ? 'conflict' : decided;
       switch (outcome) {
@@ -133,7 +145,7 @@ export async function applySnapshot(
           const changedLocally = !sameDoc(mine, remote);
           if (changedLocally) await writeDoc(root, remote, mine);
           await writeDoc(baseRoot, remote, original?.base === target ? original : undefined);
-          if (!indexedBase && !hints.has(key) && !adopted) result.added.push(target);
+          if (!indexedBase && !sent && !adopted) result.added.push(target);
           else if (changedLocally) result.updated.push(target);
           entities[target] = entry;
           break;
@@ -175,9 +187,18 @@ export async function applySnapshot(
       if (mine) await removeDoc(root, mine);
       result.removed.push(indexedBase);
     } else {
+      // Deleted in GTM, edited here: never silently recreate it on the next push. Ask.
       result.orphaned.push(indexedBase);
+      result.conflicts.push(indexedBase);
     }
     if (original) await removeDoc(baseRoot, original);
+  }
+
+  // A "deleted in GTM, edited here" conflict stays until it is resolved (the file is no longer indexed).
+  for (const orphan of state.deletedRemotely) {
+    if (entities[orphan] || result.orphaned.includes(orphan) || !local.docs.has(orphan)) continue;
+    result.orphaned.push(orphan);
+    result.conflicts.push(orphan);
   }
 
   const remoteFolders = snapshot.entities.folder.map(toFolderDoc);
@@ -203,6 +224,8 @@ export async function applySnapshot(
     conflicts: result.conflicts,
     conflictFingerprints,
     deferred: result.deferred,
+    deletedRemotely: result.orphaned,
+    pendingPush: undefined,
     builtInNames: Object.fromEntries(snapshot.builtInVariables.filter((item) => item.name).map((item) => [item.type, item.name as string])),
   };
   await writeState(root, nextState);

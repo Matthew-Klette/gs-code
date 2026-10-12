@@ -37,6 +37,8 @@ export interface GtmApi {
   getWorkspaceStatus(ref: WorkspaceRef): Promise<WorkspaceStatus>;
   /** Id of the newest container version (published or not), if any. */
   latestVersionId(accountId: string, containerId: string): Promise<string | undefined>;
+  /** Id of the version that is live right now, if any. */
+  liveVersionId(accountId: string, containerId: string): Promise<string | undefined>;
   /** Bring the workspace up to the latest container version. */
   syncWorkspace(ref: WorkspaceRef): Promise<SyncResult>;
   resolveConflict(ref: WorkspaceRef, entity: ApiChange, fingerprint?: string): Promise<void>;
@@ -122,6 +124,16 @@ export class HttpGtmApi implements GtmApi {
       return typeof header.containerVersionId === 'string' ? header.containerVersionId : undefined;
     } catch (error: unknown) {
       if (error instanceof GtmError && error.status === 404) return undefined; // container has no versions yet
+      throw error;
+    }
+  }
+
+  async liveVersionId(accountId: string, containerId: string): Promise<string | undefined> {
+    try {
+      const version = await this.request('GET', `accounts/${accountId}/containers/${containerId}/versions:live`);
+      return typeof version.containerVersionId === 'string' ? version.containerVersionId : undefined;
+    } catch (error: unknown) {
+      if (error instanceof GtmError && error.status === 404) return undefined; // nothing published yet
       throw error;
     }
   }

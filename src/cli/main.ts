@@ -6,15 +6,15 @@ import { parseArgs } from 'node:util';
 import { HttpGtmApi } from '../core/api';
 import { GoogleTokenProvider, parseClientSecretJson, signIn } from '../core/auth/oauth';
 import { describeChanges, describeConflicts, describeIssues, describePull, describeRefresh } from '../core/format';
-import { countChanges, isEmpty } from '../core/mirror/diff';
+import { changeSignature, countChanges, isEmpty } from '../core/mirror/diff';
 import { readState } from '../core/mirror/state';
 import { workingStatus } from '../core/ops/plan';
 import { assertNotProtected, createVersion, publishVersion } from '../core/ops/publish';
 import { AutoPull, clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/autoPull';
 import { pushWorkspace } from '../core/ops/push';
-import { refreshMirror, resolveGtmConflict } from '../core/ops/sync';
+import { refreshMirror, resolveGtmConflict, switchWorkspace } from '../core/ops/sync';
 import { discardChanges, initMirror, resolveConflict } from '../core/ops/workspace';
-import { GtmError } from '../core/types';
+import { GtmError, WorkspaceGoneError, type WorkspaceInfo } from '../core/types';
 import { FileCredentialStore, fileStampStore, loadCliConfig } from './fileStore';
 import { RateLimiter } from '../core/rateLimiter';
 
@@ -27,10 +27,12 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode workspaces <accountId> <GTM-XXXX|containerId>
   gscode init <dir> --account <id> --container <GTM-XXXX|id> --workspace <name|id> [--create]
   gscode status [dir]
-  gscode pull [dir]                  sync the workspace to the latest version, then pull
+  gscode pull [dir] [--no-sync]      sync the workspace to the latest version, then pull
   gscode watch [dir] [--interval <seconds>] [--verbose]
                                      keep pulling GTM changes as they happen (default every ${DEFAULT_INTERVAL_SECONDS}s)
   gscode push [dir] [--sequential] [--yes]
+  gscode switch [dir] (--workspace <name|id> | --new <name>)
+                                     follow another workspace (after yours was versioned or deleted)
   gscode discard [dir] [--path <base>]...
   gscode resolve <base> (--mine | --theirs) [--dir dir]
   gscode resolve-gtm <base> (--keep-workspace | --latest) [--dir dir]
@@ -124,9 +126,11 @@ async function refreshFirst(root: string) {
   return result.state;
 }
 
-async function cmdPull(root: string) {
-  const result = await refreshMirror(root, api, await readState(root), { force: true, onProgress: (m) => out(`  ${m}`) });
+async function cmdPull(root: string, values: { 'no-sync'?: boolean }) {
+  const result = await refreshMirror(root, api, await readState(root), { force: true, sync: !values['no-sync'], onProgress: (m) => out(`  ${m}`) });
   out(describeRefresh(result));
+  if (result.syncSkipped) out(`Note: ${result.syncSkipped}.`);
+  if (result.behind && !result.syncSkipped) out(`Container version ${result.behind} is newer than this workspace. Run \`gscode pull\` without --no-sync to bring it up to date.`);
   describeConflicts(result.state).forEach((line) => out(line));
 }
 
@@ -144,6 +148,7 @@ async function cmdWatch(root: string, values: { interval?: string; verbose?: boo
           (result.pull?.removed ?? []).forEach((base) => out(`  - ${base}`));
           describeConflicts(result.state).forEach((line) => out(`  ${line}`));
         } else if (values.verbose) out(`${stamp()} no changes`);
+        if (result.behind) out(`${stamp()} container version ${result.behind} was published; run \`gscode pull\` to bring this workspace up to date`);
       },
       onError: (error, fatal) => {
         process.stderr.write(`${stamp()} ${fatal ? 'stopped' : 'check failed, retrying with backoff'}: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -171,8 +176,10 @@ async function cmdPush(root: string, values: { sequential?: boolean; yes?: boole
   out(`Push ${countChanges(status.changes)} change(s) to ${state.container.publicId} / "${state.workspace.name}":`);
   describeChanges(status.changes).forEach((line) => out(`  ${line}`));
   describeIssues(status.issues).forEach((line) => out(line));
+  // Pin the exact change set shown above: anything saved while the prompt is open stops the push.
+  const expected = changeSignature(status.changes);
   if (!values.yes && !(await confirm('Push these changes?'))) return out('Cancelled.');
-  const result = await pushWorkspace(root, api, state, { strategy: values.sequential ? 'sequential' : 'bulk', onProgress: (m) => out(`  ${m}`) });
+  const result = await pushWorkspace(root, api, await readState(root), { strategy: values.sequential ? 'sequential' : 'bulk', expected, onProgress: (m) => out(`  ${m}`) });
   out(`Pushed ${result.pushed} change(s).${result.refresh ? ` Refresh: ${describePull(result.refresh)}` : ''}`);
 }
 
@@ -188,6 +195,25 @@ async function cmdVersion(root: string, values: { name?: string; notes?: string;
   const current = await refreshFirst(root);
   const result = await createVersion(root, api, current, { name: values.name, notes: values.notes ?? '', publish: !!values.publish, protectedContainers, onProgress: (m) => out(`  ${m}`) });
   out(`Version ${result.versionId} created${result.published ? ' and published' : ''}. Now on workspace "${result.state.workspace.name}".`);
+}
+
+async function cmdSwitch(root: string, values: { workspace?: string; new?: string }) {
+  const state = await readState(root);
+  const { accountId, containerId } = state.container;
+  let target: WorkspaceInfo | undefined;
+  if (values.new) {
+    target = await api.createWorkspace(accountId, containerId, values.new);
+  } else if (values.workspace) {
+    const workspaces = await api.listWorkspaces(accountId, containerId);
+    target = workspaces.find((w) => w.workspaceId === values.workspace || w.name === values.workspace);
+    if (!target) throw new GtmError(`Workspace "${values.workspace}" not found. Workspaces: ${workspaces.map((w) => `${w.workspaceId} "${w.name}"`).join(', ') || 'none'}`);
+  } else {
+    throw new GtmError('Usage: gscode switch [dir] (--workspace <name|id> | --new <name>)');
+  }
+  const result = await switchWorkspace(root, api, state, target, { onProgress: (m) => out(`  ${m}`) });
+  out(`Now following workspace "${target.name}" (${target.workspaceId}). ${describeRefresh(result)}`);
+  out(`Your working files from before the switch are backed up in ${result.backup}.`);
+  describeConflicts(result.state).forEach((line) => out(line));
 }
 
 async function cmdPublish(root: string, values: { version?: string; confirm?: string }) {
@@ -212,6 +238,7 @@ async function main(argv: string[]): Promise<void> {
       path: { type: 'string', multiple: true }, mine: { type: 'boolean' }, theirs: { type: 'boolean' }, dir: { type: 'string' },
       name: { type: 'string' }, notes: { type: 'string' }, publish: { type: 'boolean' }, confirm: { type: 'string' }, help: { type: 'boolean', short: 'h' },
       interval: { type: 'string' }, verbose: { type: 'boolean', short: 'v' }, latest: { type: 'boolean' }, 'keep-workspace': { type: 'boolean' }, version: { type: 'string' },
+      'no-sync': { type: 'boolean' }, new: { type: 'string' },
     },
   });
   const [command, ...rest] = positionals;
@@ -227,7 +254,7 @@ async function main(argv: string[]): Promise<void> {
     }
     case 'init': return cmdInit(rest[0], values);
     case 'status': return cmdStatus(root);
-    case 'pull': return cmdPull(root);
+    case 'pull': return cmdPull(root, values);
     case 'watch': return cmdWatch(root, values);
     case 'push': return cmdPush(root, values);
     case 'discard': return out(`Discarded ${await discardChanges(root, await readState(root), values.path)} change(s).`);
@@ -248,11 +275,16 @@ async function main(argv: string[]): Promise<void> {
     }
     case 'version': return cmdVersion(root, values);
     case 'publish': return cmdPublish(root, values);
+    case 'switch': return cmdSwitch(root, { workspace: values.workspace, new: values.new });
     default: return out(HELP);
   }
 }
 
 main(process.argv.slice(2)).catch((error: unknown) => {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  if (error instanceof WorkspaceGoneError) {
+    error.candidates.forEach((w) => process.stderr.write(`  ${w.workspaceId}\t${w.name}\n`));
+    process.stderr.write('Follow one with `gscode switch --workspace <id>`, or `gscode switch --new <name>`.\n');
+  }
   process.exitCode = 1;
 });

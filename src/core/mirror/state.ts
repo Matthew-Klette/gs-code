@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { EntityKind } from '../kinds';
@@ -21,6 +22,21 @@ export interface RemoteMark {
   readonly status?: string;
   /** Container version the workspace was last synced to. */
   readonly versionId?: string;
+  /** A newer container version that exists but the workspace was not synced to (auto-pull never syncs). */
+  readonly behind?: string;
+}
+
+/** What a push sent, kept until a pull has taken GTM's copy of it (survives a failed refresh). */
+export interface PendingPush {
+  /** `kind:id` → base path and the canonical local content that was sent. */
+  readonly pushed: Readonly<Record<string, PushedDoc>>;
+  /** Unnamed or unmatched new entities: base path → canonical content sent; adopted by content. */
+  readonly created: Readonly<Record<string, string>>;
+}
+
+export interface PushedDoc {
+  readonly base: string;
+  readonly content: string;
 }
 
 /** A GTM merge conflict: the entity changed in this workspace and in a newer container version. */
@@ -55,10 +71,13 @@ export interface MirrorState {
   readonly gtmConflicts: readonly GtmConflict[];
   /** Whole files (folders.json, built-in-variables.json) whose remote update waits until their open editor is saved. */
   readonly deferred: readonly string[];
+  /** Conflicts where GTM deleted an entity you edited: Keep Mine recreates it, Take Theirs deletes your file. */
+  readonly deletedRemotely: readonly string[];
+  readonly pendingPush?: PendingPush;
 }
 
 export function emptyState(container: ContainerInfo, workspace: WorkspaceInfo): MirrorState {
-  return { version: 1, container, workspace, entities: {}, folders: {}, conflicts: [], conflictFingerprints: {}, builtInNames: {}, gtmConflicts: [], deferred: [] };
+  return { version: 1, container, workspace, entities: {}, folders: {}, conflicts: [], conflictFingerprints: {}, builtInNames: {}, gtmConflicts: [], deferred: [], deletedRemotely: [] };
 }
 
 export function entityKey(kind: EntityKind, id: string): string {
@@ -86,13 +105,15 @@ export async function readState(root: string): Promise<MirrorState> {
     builtInNames: parsed.builtInNames ?? {},
     gtmConflicts: parsed.gtmConflicts ?? [],
     deferred: parsed.deferred ?? [],
+    deletedRemotely: parsed.deletedRemotely ?? [],
   };
 }
 
 export async function writeState(root: string, state: MirrorState): Promise<void> {
   const file = path.join(root, STATE_FILE);
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.tmp`;
+  // Unique temp name: two writers (CLI + extension) never clobber each other's half-written file.
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
   await fs.rename(temp, file);
 }

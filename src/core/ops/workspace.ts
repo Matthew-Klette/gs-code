@@ -7,7 +7,8 @@ import { emptyState, hasState, readState, writeState, type MirrorState } from '.
 import { renderFiles, type EntityDoc } from '../serialize/entityFiles';
 import { GtmError, type ContainerInfo, type WorkspaceInfo } from '../types';
 import { workingStatus } from './plan';
-import { isServerContainer, pullWorkspace, type PullResult } from './pull';
+import { isServerContainer, type PullResult } from './pull';
+import { refreshMirror } from './sync';
 
 const README = `This folder mirrors a Google Tag Manager workspace.
 
@@ -26,7 +27,7 @@ export async function initMirror(root: string, api: GtmApi, container: Container
     if (existing.workspace.workspaceId !== workspace.workspaceId || existing.container.containerId !== container.containerId) {
       throw new GtmError(`${root} already mirrors ${existing.container.publicId} / ${existing.workspace.name}. Pick an empty folder.`);
     }
-    return pullWorkspace(root, api, existing);
+    return firstPull(root, api, existing);
   }
   const entries = await fs.readdir(root).catch(() => [] as string[]);
   if (entries.some((entry) => !entry.startsWith('.'))) {
@@ -36,7 +37,13 @@ export async function initMirror(root: string, api: GtmApi, container: Container
   await fs.writeFile(path.join(root, STATE_DIR, 'README.txt'), README, 'utf8');
   const state = emptyState(container, workspace);
   await writeState(root, state);
-  return pullWorkspace(root, api, state);
+  return firstPull(root, api, state);
+}
+
+/** A full pull that also records GTM's status and latest version, so the next check costs two requests. */
+async function firstPull(root: string, api: GtmApi, state: MirrorState): Promise<PullResult> {
+  const result = await refreshMirror(root, api, state, { force: true });
+  return result.pull as PullResult;
 }
 
 /** Restore working files for the given base paths (or everything) from `.gtm/base`. */
@@ -73,6 +80,7 @@ export type Resolution = 'mine' | 'theirs';
 export async function resolveConflict(root: string, state: MirrorState, base: string, resolution: Resolution): Promise<MirrorState> {
   if (!state.conflicts.includes(base)) throw new GtmError(`${base} is not in conflict.`);
   if (base === FOLDERS_FILE) return resolveFolders(root, state, resolution);
+  if (state.deletedRemotely.includes(base)) return resolveDeleted(root, state, base, resolution);
   const isServer = isServerContainer(state);
   const remote = (await readModel(path.join(root, REMOTE_DIR), isServer)).model.docs.get(base);
   const local = (await readModel(root, isServer)).model.docs.get(base);
@@ -93,6 +101,21 @@ export async function resolveConflict(root: string, state: MirrorState, base: st
     conflicts: state.conflicts.filter((item) => item !== base),
     conflictFingerprints,
     entities: entry ? { ...state.entities, [base]: { ...entry, fingerprint } } : state.entities,
+  };
+  await writeState(root, next);
+  return next;
+}
+
+/** GTM deleted an entity you edited. mine: keep the file, so Push creates it again. theirs: delete the file. */
+async function resolveDeleted(root: string, state: MirrorState, base: string, resolution: Resolution): Promise<MirrorState> {
+  if (resolution === 'theirs') {
+    const local = (await readModel(root, isServerContainer(state))).model.docs.get(base);
+    if (local) await removeDoc(root, local);
+  }
+  const next: MirrorState = {
+    ...state,
+    conflicts: state.conflicts.filter((item) => item !== base),
+    deletedRemotely: state.deletedRemotely.filter((item) => item !== base),
   };
   await writeState(root, next);
   return next;

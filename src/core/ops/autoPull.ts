@@ -1,7 +1,8 @@
 import type { GtmApi } from '../api';
 import type { Overlay } from '../mirror/model';
+import { MirrorBusyError } from '../mirror/lock';
 import { readState } from '../mirror/state';
-import { AuthError } from '../types';
+import { AuthError, WorkspaceGoneError } from '../types';
 import { refreshMirror, type RefreshResult } from './sync';
 
 /** One check is 2 requests, so 60 s uses ~3 of the 25 requests GTM allows per 100 s. */
@@ -82,7 +83,8 @@ export class AutoPull {
     const exclusive = this.options.exclusive ?? ((task) => task());
     try {
       const result = await exclusive(async () =>
-        refreshMirror(this.root, this.api, await readState(this.root), { force, overlay: this.options.overlay?.() }),
+        // Never wait on another process: if the CLI or an agent is mid-push, check again next round.
+        refreshMirror(this.root, this.api, await readState(this.root), { force, overlay: this.options.overlay?.(), lockWaitMs: 0 }),
       );
       this.failures = 0;
       this.lastError = undefined;
@@ -91,9 +93,11 @@ export class AutoPull {
       this.options.onResult?.(result);
       return result;
     } catch (error: unknown) {
+      if (error instanceof MirrorBusyError) return undefined;
       this.failures++;
       this.lastError = error;
-      const fatal = error instanceof AuthError;
+      // Signed out, or the workspace is gone: retrying cannot help until the user acts.
+      const fatal = error instanceof AuthError || error instanceof WorkspaceGoneError;
       if (fatal) this.stop();
       this.options.onError?.(error, fatal);
       return undefined;

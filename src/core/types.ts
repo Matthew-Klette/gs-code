@@ -97,6 +97,27 @@ export class AuthError extends GtmError {
   }
 }
 
+/**
+ * The mirrored workspace no longer exists in GTM (versioned or deleted, by you or a teammate).
+ * GS Code never guesses a replacement: the user picks one from `candidates`, or creates one.
+ */
+export class WorkspaceGoneError extends GtmError {
+  constructor(
+    readonly workspace: WorkspaceInfo,
+    readonly candidates: readonly WorkspaceInfo[],
+    readonly reason?: string,
+  ) {
+    super(`Workspace "${workspace.name}" no longer exists in GTM (it was versioned or deleted). Pick the workspace this folder should follow ("GS Code: Switch Workspace…" or \`gscode switch\`).`);
+    this.name = 'WorkspaceGoneError';
+  }
+}
+
+/** The workspace was versioned while you were working: GTM answers 404, or 400 "already submitted". */
+export function isWorkspaceGoneStatus(error: unknown): boolean {
+  if (!(error instanceof GtmError)) return false;
+  return error.status === 404 || (error.status === 400 && /already submitted|not found|does not exist/i.test(error.message));
+}
+
 export function workspacePath(ref: WorkspaceRef): string {
   return `accounts/${ref.accountId}/containers/${ref.containerId}/workspaces/${ref.workspaceId}`;
 }

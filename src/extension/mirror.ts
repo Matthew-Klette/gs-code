@@ -10,6 +10,7 @@ import { AutoPull, clampInterval, DEFAULT_INTERVAL_SECONDS } from '../core/ops/a
 import { workingStatus, type WorkingStatus } from '../core/ops/plan';
 import type { RefreshResult } from '../core/ops/sync';
 import { renderFiles } from '../core/serialize/entityFiles';
+import { WorkspaceGoneError } from '../core/types';
 
 const DEBOUNCE_MS = 300;
 
@@ -73,6 +74,7 @@ export class MirrorController implements vscode.Disposable, vscode.QuickDiffProv
   private readonly diagnostics: vscode.DiagnosticCollection;
   private readonly onDidChange: () => void;
   private notifiedConflicts = '';
+  private notifiedBehind?: string;
   readonly autoPull: AutoPull;
   state?: MirrorState;
   status?: WorkingStatus;
@@ -99,9 +101,15 @@ export class MirrorController implements vscode.Disposable, vscode.QuickDiffProv
       onError: (error, fatal) => {
         const message = error instanceof Error ? error.message : String(error);
         deps.output.appendLine(`Auto-pull ${this.label}: ${fatal ? 'stopped' : 'failed, will retry'}: ${message}`);
-        if (fatal) void vscode.window.showWarningMessage(`GS Code stopped checking GTM for changes: ${message}`, 'Sign In').then((choice) => {
-          if (choice) void vscode.commands.executeCommand('gsCode.signIn');
-        });
+        if (fatal && error instanceof WorkspaceGoneError) {
+          void vscode.window.showWarningMessage(`GS Code: ${message}`, 'Switch Workspace…').then((choice) => {
+            if (choice) void vscode.commands.executeCommand('gsCode.switchWorkspace', this.scm);
+          });
+        } else if (fatal) {
+          void vscode.window.showWarningMessage(`GS Code stopped checking GTM for changes: ${message}`, 'Sign In').then((choice) => {
+            if (choice) void vscode.commands.executeCommand('gsCode.signIn');
+          });
+        }
         this.onDidChange();
       },
     });
@@ -138,6 +146,14 @@ export class MirrorController implements vscode.Disposable, vscode.QuickDiffProv
   /** Update the views after any refresh (auto or a command) and tell the user what arrived. */
   async afterRefresh(result: RefreshResult, source: 'auto' | 'command'): Promise<void> {
     await this.refresh();
+    if (result.behind && result.behind !== this.notifiedBehind && !result.syncSkipped) {
+      this.notifiedBehind = result.behind;
+      void vscode.window
+        .showInformationMessage(`GS Code: container version ${result.behind} was published. Pull to bring "${this.state?.workspace.name ?? 'this workspace'}" up to date.`, 'Pull')
+        .then((choice) => {
+          if (choice) void vscode.commands.executeCommand('gsCode.pull', this.scm);
+        });
+    }
     if (!result.pulled) return;
     const summary = describeRefresh(result);
     this.deps.output.appendLine(`${new Date().toLocaleTimeString()} ${source === 'auto' ? 'Auto-pull' : 'Pull'} ${this.label}: ${summary}`);

@@ -7,9 +7,9 @@ import { AutoPull, clampInterval, MIN_INTERVAL_SECONDS } from '../src/core/ops/a
 import { workingStatus } from '../src/core/ops/plan';
 import { createVersion } from '../src/core/ops/publish';
 import { PushBlockedError, pushWorkspace } from '../src/core/ops/push';
-import { refreshMirror, resolveGtmConflict, statusSignature } from '../src/core/ops/sync';
+import { refreshMirror, resolveGtmConflict, statusSignature, switchWorkspace } from '../src/core/ops/sync';
 import { initMirror } from '../src/core/ops/workspace';
-import { AuthError, type ApiEntity, type RemoteSnapshot, type WorkspaceRef } from '../src/core/types';
+import { AuthError, WorkspaceGoneError, type ApiEntity, type RemoteSnapshot, type WorkspaceRef } from '../src/core/types';
 import { CONTAINER, seededFake, type FakeGtm } from './fakeApi';
 
 let root: string;
@@ -27,6 +27,8 @@ async function exists(rel: string): Promise<boolean> {
 }
 const state = (): Promise<MirrorState> => readState(root);
 const check = async (overlay?: Map<string, string>, force = false) => refreshMirror(root, gtm, await state(), { overlay, force });
+/** An explicit Pull: the only kind of refresh that may sync the workspace to a newer version. */
+const pullNow = async () => refreshMirror(root, gtm, await state(), { force: true, sync: true });
 const tagText = async (name: string) => readFile(path.join(root, 'tags', `${name}.json`), 'utf8');
 
 beforeEach(async () => {
@@ -146,13 +148,23 @@ describe('newer container versions', () => {
       trigger: [...contents.trigger, gtm.restamp('trigger', { triggerId: '900', name: 'Published elsewhere', type: 'pageview' })],
     }));
 
-  it('syncs the workspace to the latest version, then pulls', async () => {
+  it('a background check never writes to GTM: it only reports that a newer version exists', async () => {
     const versionId = publishNewTrigger();
     const result = await check();
+    expect(gtm.calls).toEqual(['status', 'latestVersion']);
+    expect(result.behind).toBe(versionId);
+    expect((await state()).remote?.behind).toBe(versionId);
+    await expect(createVersion(root, gtm, await state(), { name: 'v', notes: '', publish: false, protectedContainers: [] })).rejects.toThrow(/Pull first/);
+  });
+
+  it('an explicit pull syncs the workspace to the latest version, then pulls', async () => {
+    const versionId = publishNewTrigger();
+    const result = await pullNow();
     expect(gtm.calls.slice(0, 4)).toEqual(['status', 'latestVersion', 'sync', 'status']);
     expect(result.syncedTo).toBe(versionId);
     expect(result.pull?.added).toEqual(['triggers/Published elsewhere']);
     expect((await state()).remote?.versionId).toBe(versionId);
+    expect((await state()).remote?.behind).toBeUndefined();
     gtm.calls = [];
     expect((await check()).pulled).toBe(false);
     expect(gtm.calls).toEqual(['status', 'latestVersion']);
@@ -162,7 +174,7 @@ describe('newer container versions', () => {
     const tag = await readJson('tags/GA4 - purchase.json');
     await writeJson('tags/GA4 - purchase.json', { ...tag, notes: 'mine, not pushed' });
     publishNewTrigger();
-    await check();
+    await pullNow();
     expect((await readJson('tags/GA4 - purchase.json')).notes).toBe('mine, not pushed');
     expect(await exists('triggers/Published elsewhere.json')).toBe(true);
   });
@@ -176,7 +188,7 @@ describe('newer container versions', () => {
         ...contents,
         tag: contents.tag.map((item) => (item.name === 'GA4 - purchase' ? gtm.restamp('tag', { ...item, notes: 'published edit' }) : item)),
       }));
-      await check();
+      await pullNow();
     });
 
     it('records the conflict and writes the latest version for comparison', async () => {
@@ -215,7 +227,7 @@ describe('newer container versions', () => {
 });
 
 describe('workspace replaced in GTM', () => {
-  it('follows to a new workspace with the same name when the old one was versioned from the UI', async () => {
+  it('never guesses a replacement: it stops and lists the workspaces to choose from', async () => {
     await rm(root, { recursive: true, force: true });
     root = await mkdtemp(path.join(tmpdir(), 'gscode-sync-'));
     const named = await gtm.createWorkspace('100', '200', 'claude-test');
@@ -224,11 +236,22 @@ describe('workspace replaced in GTM', () => {
     await writeJson('tags/GA4 - purchase.json', { ...tag, notes: 'unpushed' });
     gtm.versionFromUi();
     gtm.calls = [];
-    const result = await check();
-    expect(gtm.calls).toContain('createWorkspace claude-test');
-    expect(result.movedTo?.name).toBe('claude-test');
+    const error = await check().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WorkspaceGoneError);
+    expect((error as WorkspaceGoneError).candidates.map((w) => w.name)).toEqual(['Default Workspace']);
+    expect(gtm.calls.filter((call) => call.startsWith('createWorkspace'))).toEqual([]);
+    expect((await state()).workspace.workspaceId).toBe(named.workspaceId);
+  });
+
+  it('switching keeps unpushed edits and backs up the working files first', async () => {
+    const tag = await readJson('tags/GA4 - purchase.json');
+    await writeJson('tags/GA4 - purchase.json', { ...tag, notes: 'unpushed' });
+    gtm.versionFromUi();
+    const result = await switchWorkspace(root, gtm, await state(), gtm.workspace);
+    expect(result.movedTo?.workspaceId).toBe(gtm.workspace.workspaceId);
     expect((await state()).workspace.workspaceId).toBe(gtm.workspace.workspaceId);
     expect((await readJson('tags/GA4 - purchase.json')).notes).toBe('unpushed');
+    expect((await readJson(`${result.backup}/tags/GA4 - purchase.json`)).notes).toBe('unpushed');
   });
 });
 
