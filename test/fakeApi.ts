@@ -380,13 +380,13 @@ export function seededFake(): FakeGtm {
     name: 'Hash Email',
     templateData: '___INFO___\n\n{\n  "type": "MACRO"\n}\n\n\n___TEMPLATE_PARAMETERS___\n\n[]\n\n\n___SANDBOXED_JS_FOR_WEB_TEMPLATE___\n\nreturn data.email;\n\n\n___NOTES___\n\n\n\n\n',
   });
-  gtm.seed('variable', { variableId: '10', name: 'DL - user_id', type: 'v', parameter: [{ type: 'TEMPLATE', key: 'name', value: 'user_id' }] });
-  gtm.seed('variable', { variableId: '11', name: 'cJS - page type', type: 'jsm', parameter: [{ type: 'TEMPLATE', key: 'javascript', value: 'function() {\n  return "home";\n}' }] });
+  gtm.seed('variable', { variableId: '10', name: 'DL - user_id', type: 'v', parameter: [{ type: 'template', key: 'name', value: 'user_id' }] });
+  gtm.seed('variable', { variableId: '11', name: 'cJS - page type', type: 'jsm', parameter: [{ type: 'template', key: 'javascript', value: 'function() {\n  return "home";\n}' }] });
   gtm.seed('variable', { variableId: '12', name: 'Hashed email', type: 'cvt_200_50', parameter: [] });
-  gtm.seed('trigger', { triggerId: '20', name: 'CE - purchase', type: 'customEvent', customEventFilter: [{ type: 'equals', parameter: [{ type: 'TEMPLATE', key: 'arg0', value: '{{_event}}' }, { type: 'TEMPLATE', key: 'arg1', value: 'purchase' }] }] });
-  gtm.seed('trigger', { triggerId: '21', name: 'TG - purchase group', type: 'triggerGroup', parameter: [{ type: 'LIST', key: 'triggerIds', list: [{ type: 'TRIGGER_REFERENCE', value: '20' }] }] });
-  gtm.seed('tag', { tagId: '30', name: 'GA4 - purchase', type: 'gaawe', parentFolderId: '1', firingTriggerId: ['20'], parameter: [{ type: 'TEMPLATE', key: 'eventName', value: 'purchase' }, { type: 'TEMPLATE', key: 'userId', value: '{{DL - user_id}}' }] });
-  gtm.seed('tag', { tagId: '31', name: 'cHTML - hello', type: 'html', firingTriggerId: ['2147479553'], parameter: [{ type: 'TEMPLATE', key: 'html', value: '<script>\n  console.log("hi");\n</script>' }] });
+  gtm.seed('trigger', { triggerId: '20', name: 'CE - purchase', type: 'customEvent', customEventFilter: [{ type: 'equals', parameter: [{ type: 'template', key: 'arg0', value: '{{_event}}' }, { type: 'template', key: 'arg1', value: 'purchase' }] }] });
+  gtm.seed('trigger', { triggerId: '21', name: 'TG - purchase group', type: 'triggerGroup', parameter: [{ type: 'list', key: 'triggerIds', list: [{ type: 'triggerReference', value: '20' }] }] });
+  gtm.seed('tag', { tagId: '30', name: 'GA4 - purchase', type: 'gaawe', parentFolderId: '1', firingTriggerId: ['20'], parameter: [{ type: 'template', key: 'eventName', value: 'purchase' }, { type: 'template', key: 'userId', value: '{{DL - user_id}}' }] });
+  gtm.seed('tag', { tagId: '31', name: 'cHTML - hello', type: 'html', firingTriggerId: ['2147479553'], parameter: [{ type: 'template', key: 'html', value: '<script>\n  console.log("hi");\n</script>' }] });
   gtm.markBaseline();
   return gtm;
 }

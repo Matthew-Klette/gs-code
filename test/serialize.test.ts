@@ -196,9 +196,26 @@ describe('validate', () => {
       'error folders.json duplicate folder "G"',
       'error tags/a.json setupTag references unknown tag "Missing"',
       'error tags/a.json unknown folder "F" (add it to folders.json)',
+      'error tags/a.json {{Unknown}} is not a variable or enabled built-in in this workspace (renamed or deleted? enable it in built-in-variables.json)',
       'error tags/b.json duplicate tag name "A" (also in tags/a)',
       'error tags/b.json unknown template "Nope"',
-      'warning tags/a.json {{Unknown}} is not a variable or enabled built-in in this workspace',
+    ]);
+  });
+
+  it('ignores {{…}} in notes, flags built-in name clashes, sequencing loops and template name drift', async () => {
+    const { validateModel } = await import('../src/core/mirror/validate');
+    const info = (displayName: string) => [{ section: 'INFO', content: JSON.stringify({ displayName }) }];
+    const docs = new Map([
+      ['tags/a', { kind: 'tag' as const, base: 'tags/a', data: { name: 'A', type: 'html', notes: 'see {{Old var}}', setupTag: [{ tagName: 'B' }] } }],
+      ['tags/b', { kind: 'tag' as const, base: 'tags/b', data: { name: 'B', type: 'html', teardownTag: [{ tagName: 'A' }] } }],
+      ['variables/p', { kind: 'variable' as const, base: 'variables/p', data: { name: 'Page URL', type: 'v' } }],
+      ['templates/T', { kind: 'template' as const, base: 'templates/T', data: { name: 'T', sections: info('Other') } }],
+    ]);
+    const issues = validateModel({ docs, folders: [], builtIns: ['PAGE_URL'] }, new Map([['PAGE_URL', 'Page URL']]));
+    expect(issues.map((i) => `${i.severity} ${i.path} ${i.message}`).sort()).toEqual([
+      'error tags/a.json tag sequencing loops: A → B → A',
+      'error variables/p.json variable name "Page URL" is already used by an enabled built-in variable',
+      'warning templates/T/template.json name "T" differs from info.json displayName "Other"; keep them the same',
     ]);
   });
 });

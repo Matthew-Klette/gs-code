@@ -242,7 +242,8 @@ export class HttpGtmApi implements GtmApi {
     try {
       return await this.listAll(path, field);
     } catch (error: unknown) {
-      const tolerated = error instanceof GtmError && (error.status === 400 || error.status === 404);
+      // 403 too: zones and Google tag configs are feature-gated on some accounts (non-360, older containers).
+      const tolerated = error instanceof GtmError && (error.status === 400 || error.status === 403 || error.status === 404);
       if (OPTIONAL_KINDS.has(kind) && tolerated) return undefined;
       throw error;
     }
@@ -350,6 +351,35 @@ export function isQuotaError(status: number, parsed: Record<string, unknown>): b
 
 function toGtmError(method: Method, path: string, status: number, parsed: Record<string, unknown>, text: string): GtmError {
   const apiMessage = (parsed.error as { message?: string } | undefined)?.message;
-  const message = `${method} ${path.split('?')[0]} failed (${status}): ${apiMessage ?? (text.slice(0, 300) || 'no body')}`;
-  return new GtmError(message, status, parsed.error);
+  const raw = `${method} ${path.split('?')[0]} failed (${status}): ${apiMessage ?? (text.slice(0, 300) || 'no body')}`;
+  const hint = explainError(method, path, status, apiMessage ?? '');
+  return new GtmError(hint ? `${hint}\n${raw}` : raw, status, parsed.error);
+}
+
+/** One plain sentence for the errors people actually hit; the raw API message stays underneath. */
+export function explainError(method: string, path: string, status: number, apiMessage: string): string | undefined {
+  const message = apiMessage.toLowerCase();
+  if (message.includes('has not been used in project') || message.includes('accessnotconfigured') || message.includes('is disabled')) {
+    return 'The Tag Manager API is not enabled in the Google Cloud project of your OAuth client. Enable it under APIs & Services → Library.';
+  }
+  if (status === 403 && /insufficient.*scope|access_token_scope_insufficient/.test(message)) {
+    return path.includes(':publish')
+      ? 'Your sign-in has no publish permission (gsCode.allowPublish was off when you signed in). Sign in again with publishing allowed.'
+      : 'Your sign-in is missing a permission GS Code needs. Sign in again.';
+  }
+  if (status === 403) {
+    if (path.includes(':publish')) return 'Your Google account cannot publish this container (it needs the Publish permission in GTM).';
+    if (path.includes(':create_version')) return 'Your Google account cannot create versions in this container (it needs Approve or Publish in GTM).';
+    if (method !== 'GET') return 'Your Google account cannot edit this workspace (it needs Edit permission on the container in GTM).';
+    return 'Your Google account cannot read this (check its permissions on the account and container in GTM).';
+  }
+  if (status === 409) return 'Someone changed this in GTM a moment ago. Pull, review, then try again.';
+  if (status === 400 && /workspace.*limit|maximum number of workspaces|too many workspaces/.test(message)) {
+    return 'This container already has the maximum number of workspaces (3 on free GTM). Delete or version one in GTM first.';
+  }
+  if (status === 400 && /submitted|approval/.test(message)) return 'This workspace was submitted for approval (GTM 360) and cannot be edited until the approval is resolved.';
+  if (status === 400 && path.endsWith('/bulk_update')) {
+    return 'GTM rejected the push. To find the entity it objects to, push with the sequential strategy (`gscode push --sequential`, or the gsCode.pushStrategy setting).';
+  }
+  return undefined;
 }

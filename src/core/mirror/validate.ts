@@ -27,11 +27,73 @@ export function validateModel(model: MirrorModel, builtInNames: ReadonlyMap<stri
     ...model.builtIns.map((type) => builtInNames.get(type)).filter(isString),
   ]);
 
+  const builtInDisplayNames = new Set(model.builtIns.map((type) => builtInNames.get(type)).filter(isString));
   return [
     ...duplicateNames(docs),
     ...duplicateFolders(model),
+    ...builtInClashes(docs, builtInDisplayNames),
+    ...sequencingCycles(docs),
+    ...templateNameMismatches(docs),
     ...docs.flatMap((doc) => checkDoc(doc, { triggers, tags, templates, folders, variables })),
   ];
+}
+
+/** A user variable named like an enabled built-in makes `{{…}}` ambiguous; GTM rejects it. */
+function builtInClashes(docs: readonly EntityDoc[], builtIns: ReadonlySet<string>): Issue[] {
+  return docs
+    .filter((doc) => doc.kind === 'variable' && builtIns.has(docName(doc) ?? ''))
+    .map((doc) => ({ severity: 'error', path: docPath(doc), message: `variable name "${docName(doc)}" is already used by an enabled built-in variable` }));
+}
+
+/** Tag sequencing (setupTag / teardownTag) that loops back on itself never compiles. */
+function sequencingCycles(docs: readonly EntityDoc[]): Issue[] {
+  const edges = new Map<string, string[]>();
+  const pathOf = new Map<string, string>();
+  for (const doc of docs.filter((item) => item.kind === 'tag')) {
+    const name = docName(doc);
+    if (!name) continue;
+    pathOf.set(name, docPath(doc));
+    const linked = ['setupTag', 'teardownTag'].flatMap((key) =>
+      (Array.isArray(doc.data[key]) ? (doc.data[key] as { tagName?: unknown }[]) : []).map((item) => item.tagName).filter(isString),
+    );
+    edges.set(name, linked);
+  }
+  const issues: Issue[] = [];
+  const reported = new Set<string>();
+  const visit = (name: string, trail: readonly string[]): void => {
+    const loopAt = trail.indexOf(name);
+    if (loopAt >= 0) {
+      const loop = [...trail.slice(loopAt), name];
+      const key = [...new Set(trail.slice(loopAt))].sort().join('\u0000');
+      if (!reported.has(key)) {
+        reported.add(key);
+        issues.push({ severity: 'error', path: pathOf.get(name) ?? 'tags', message: `tag sequencing loops: ${loop.join(' → ')}` });
+      }
+      return;
+    }
+    for (const next of edges.get(name) ?? []) visit(next, [...trail, name]);
+  };
+  for (const name of edges.keys()) visit(name, []);
+  return issues;
+}
+
+/** The template's name and its INFO displayName should agree, or references by name drift after a push. */
+function templateNameMismatches(docs: readonly EntityDoc[]): Issue[] {
+  const issues: Issue[] = [];
+  for (const doc of docs.filter((item) => item.kind === 'template')) {
+    const info = ((doc.data.sections ?? []) as { section?: string; content?: string }[]).find((section) => section.section === 'INFO');
+    let displayName: unknown;
+    try {
+      displayName = info?.content ? (JSON.parse(info.content) as { displayName?: unknown }).displayName : undefined;
+    } catch {
+      issues.push({ severity: 'error', path: `${doc.base}/info.json`, message: 'info.json is not valid JSON' });
+      continue;
+    }
+    if (typeof displayName === 'string' && displayName !== docName(doc)) {
+      issues.push({ severity: 'warning', path: docPath(doc), message: `name "${docName(doc)}" differs from info.json displayName "${displayName}"; keep them the same` });
+    }
+  }
+  return issues;
 }
 
 interface Known {
@@ -75,10 +137,12 @@ function checkDoc(doc: EntityDoc, known: Known): Issue[] {
       if (typeof item.tagName === 'string' && !known.tags.has(item.tagName)) error(`${key} references unknown tag "${item.tagName}"`);
     }
   }
-  for (const name of variableRefs(data)) {
+  const { notes: _notes, ...compiled } = data;
+  for (const name of variableRefs(compiled)) {
     // `{{_event}}`, `{{_url}}`… are GTM-internal macros, not user variables.
+    // GTM refuses to create a version with an unknown variable reference, so catch it before pushing.
     if (!known.variables.has(name) && !name.startsWith('_')) {
-      issues.push({ severity: 'warning', path, message: `{{${name}}} is not a variable or enabled built-in in this workspace` });
+      error(`{{${name}}} is not a variable or enabled built-in in this workspace (renamed or deleted? enable it in built-in-variables.json)`);
     }
   }
   return issues;

@@ -9,6 +9,11 @@ export interface IndexEntry {
   readonly kind: EntityKind;
   readonly id: string;
   readonly fingerprint?: string;
+  /**
+   * The exact `cvt_…` type GTM stores for a template-based entity. A gallery template can be referenced
+   * as `cvt_<galleryId>` or `cvt_<container>_<template>`; an edit sends back the one GTM has.
+   */
+  readonly rawType?: string;
 }
 
 export interface FolderEntry {

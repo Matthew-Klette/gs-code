@@ -74,10 +74,15 @@ function normalizeSidecars(kind: EntityKind, type: unknown, parameter: unknown):
   );
 }
 
+/** Template fields with their own handling; anything else GTM adds later is kept and sent back as is. */
+const TEMPLATE_OWN_FIELDS = new Set([...VOLATILE_FIELDS, 'templateId', 'name', 'galleryReference', 'templateData']);
+
 function templateToLocal(entity: ApiEntity): Record<string, unknown> {
+  const extra = Object.fromEntries(Object.entries(entity).filter(([key]) => !TEMPLATE_OWN_FIELDS.has(key)));
   return {
     name: entity.name,
     ...(entity.galleryReference ? { galleryReference: entity.galleryReference } : {}),
+    ...extra,
     sections: splitTemplateData(String(entity.templateData ?? '')),
   };
 }
@@ -116,15 +121,44 @@ export function toApiBody(doc: EntityDoc, lookup: IdLookup): ApiBody {
     ...(typeof folder === 'string' ? { parentFolderId: resolve('folder', folder, (ref) => folderRefToId(ref, lookup)) } : {}),
     ...(parameter === undefined ? {} : { parameter: mapTriggerReferences(parameter, (ref) => resolve('parameter', ref, triggerFn)) }),
   };
-  return { body, unresolved };
+  return { body: normalizeEnums(doc.kind, body), unresolved };
+}
+
+/** `TRIGGER_REFERENCE`, `MATCH_REGEX`, `CUSTOM_EVENT` (container-export spelling) → the API's `triggerReference`… */
+export function exportEnumToApi(value: string): string {
+  if (!/^[A-Z][A-Z0-9]*(_[A-Z0-9]+)*$/.test(value)) return value;
+  return value.toLowerCase().replace(/_([a-z0-9])/g, (_match, char: string) => char.toUpperCase());
+}
+
+/**
+ * Files pasted from a container export spell enums in UPPER_SNAKE; the REST API returns (and expects)
+ * lowerCamel. Parameter and condition `type`s, and a trigger's own `type`, are normalised on push.
+ */
+export function normalizeEnums(kind: EntityKind, body: ApiEntity): ApiEntity {
+  const walk = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(walk);
+    if (!value || typeof value !== 'object') return value;
+    const record = value as Record<string, unknown>;
+    const mapped = Object.fromEntries(Object.entries(record).map(([key, child]) => [key, walk(child)]));
+    const isParamOrCondition = 'key' in record || 'value' in record || 'list' in record || 'map' in record || 'parameter' in record;
+    return isParamOrCondition && typeof record.type === 'string' ? { ...mapped, type: exportEnumToApi(record.type) } : mapped;
+  };
+  const { name, type, ...rest } = body;
+  const walked = walk(rest) as ApiEntity;
+  return {
+    ...(name === undefined ? {} : { name }),
+    ...(typeof type === 'string' ? { type: kind === 'trigger' ? exportEnumToApi(type) : type } : {}),
+    ...walked,
+  };
 }
 
 function templateToApi(data: Readonly<Record<string, unknown>>): ApiEntity {
-  const sections = (data.sections ?? []) as TemplateSection[];
+  const { sections, name, galleryReference, ...extra } = data;
   return {
-    name: data.name as string,
-    templateData: joinTemplateData(sections),
-    ...(data.galleryReference ? { galleryReference: data.galleryReference } : {}),
+    ...extra,
+    name: name as string,
+    templateData: joinTemplateData((sections ?? []) as TemplateSection[]),
+    ...(galleryReference ? { galleryReference } : {}),
   };
 }
 

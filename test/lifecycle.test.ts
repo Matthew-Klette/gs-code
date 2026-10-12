@@ -90,14 +90,14 @@ describe.each(['bulk', 'sequential'] as const)('push (%s)', (strategy) => {
     await writeJson('tags/GA4 - purchase.json', { ...tag, parameter: [...tag.parameter, { type: 'TEMPLATE', key: 'currency', value: 'USD' }] });
     const result = await push(strategy);
     expect(result.pushed).toBe(1);
-    expect(gtm.find('tag', 'GA4 - purchase')?.parameter).toContainEqual({ type: 'TEMPLATE', key: 'currency', value: 'USD' });
+    expect(gtm.find('tag', 'GA4 - purchase')?.parameter).toContainEqual({ type: 'template', key: 'currency', value: 'USD' });
     await expectClean();
   });
 
   it('pushes edited code from a sidecar file', async () => {
     await writeFile(path.join(root, 'tags/cHTML - hello.html'), '<script>console.log("bye")</script>');
     await push(strategy);
-    expect(gtm.find('tag', 'cHTML - hello')?.parameter).toEqual([{ type: 'TEMPLATE', key: 'html', value: '<script>console.log("bye")</script>' }]);
+    expect(gtm.find('tag', 'cHTML - hello')?.parameter).toEqual([{ type: 'template', key: 'html', value: '<script>console.log("bye")</script>' }]);
     await expectClean();
   });
 

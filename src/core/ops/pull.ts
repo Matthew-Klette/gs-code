@@ -16,7 +16,7 @@ import {
 } from '../mirror/model';
 import { entityKey, writeState, type FolderEntry, type IndexEntry, type MirrorState, type PushedDoc } from '../mirror/state';
 import { canonicalJson } from '../serialize/canonical';
-import { docName, renderFiles, toLocalData, type EntityDoc } from '../serialize/entityFiles';
+import { docName, normalizeEnums, renderFiles, toLocalData, type EntityDoc } from '../serialize/entityFiles';
 import { buildRefContext } from '../serialize/references';
 import type { ApiEntity, RemoteSnapshot } from '../types';
 
@@ -102,7 +102,7 @@ export async function applySnapshot(
         created.has(doc.base) &&
         !indexedBases.has(doc.base) &&
         !claimed.has(doc.base) &&
-        (KIND_SPECS[kind].named ? docName(doc) === data.name : canonicalJson(doc.data) === canonicalJson(data)),
+        (KIND_SPECS[kind].named ? docName(doc) === data.name : sameContent(kind, doc.data, data)),
     );
   /** Was the file edited again after the push sent it? Then keep the edit; only the base moves. */
   const editedSincePush = (doc: EntityDoc | undefined, sent: string | undefined) =>
@@ -125,7 +125,8 @@ export async function applySnapshot(
       const remote: EntityDoc = { kind, base: target, data };
       const original = indexedBase ? base.docs.get(indexedBase) : undefined;
       const mine = local.docs.get(target);
-      const entry: IndexEntry = { kind, id, fingerprint: entity.fingerprint };
+      const rawType = typeof entity.type === 'string' && entity.type.startsWith('cvt_') ? entity.type : undefined;
+      const entry: IndexEntry = { kind, id, fingerprint: entity.fingerprint, ...(rawType ? { rawType } : {}) };
       const oldEntry = indexedBase ? state.entities[indexedBase] : undefined;
 
       if (indexedBase && indexedBase !== target && original) {
@@ -230,6 +231,11 @@ export async function applySnapshot(
   };
   await writeState(root, nextState);
   return { state: nextState, ...result };
+}
+
+/** Same entity content, ignoring export-style enum spelling (GTM returns `template` for a sent `TEMPLATE`). */
+function sameContent(kind: EntityDoc['kind'], a: Readonly<Record<string, unknown>>, b: Readonly<Record<string, unknown>>): boolean {
+  return canonicalJson(normalizeEnums(kind, { ...a })) === canonicalJson(normalizeEnums(kind, { ...b }));
 }
 
 type Outcome = 'take-remote' | 'refresh-base' | 'keep-local' | 'conflict';

@@ -261,14 +261,17 @@ function buildLookup(docs: ReadonlyMap<string, EntityDoc>, changes: ChangeSet, s
   return { triggerIds, folderIds, templateTypes };
 }
 
-function bodyFor(change: EntityChange, lookup: IdLookup, extra: ApiEntity): ApiEntity {
+function bodyFor(change: EntityChange, lookup: IdLookup, extra: ApiEntity, state?: MirrorState): ApiEntity {
   const doc = change.local as EntityDoc;
   const { body, unresolved } = toApiBody(doc, lookup);
   if (unresolved.length) {
     const detail = unresolved.map((item) => `${item.field} "${item.ref}"`).join(', ');
     throw new GtmError(`${change.base}: cannot resolve ${detail}`);
   }
-  return { ...body, ...extra };
+  // Same template as before: keep GTM's exact spelling of the type rather than re-deriving it.
+  const rawType = state?.entities[change.previousBase ?? change.base]?.rawType;
+  const sameType = change.type === 'updated' && change.original?.data.type === doc.data.type;
+  return { ...body, ...(rawType && sameType ? { type: rawType } : {}), ...extra };
 }
 
 function idPatch(kind: EntityKind, id: string, fingerprint?: string): ApiEntity {
@@ -330,7 +333,7 @@ async function pushBulk(
     ...addedEntities.map(({ change, id }) => entityEntry('added', change.kind, bodyFor(change, lookup, idPatch(change.kind, id)))),
     ...changes.entities
       .filter((change) => change.type === 'updated')
-      .map((change) => entityEntry('updated', change.kind, bodyFor(change, lookup, idPatch(change.kind, change.id as string, fingerprintOf(change, state))))),
+      .map((change) => entityEntry('updated', change.kind, bodyFor(change, lookup, idPatch(change.kind, change.id as string, fingerprintOf(change, state)), state))),
     ...changes.entities
       .filter((change) => change.type === 'deleted')
       .map((change) => entityEntry('deleted', change.kind, current(change.kind, change.id as string))),
@@ -418,7 +421,7 @@ async function pushSequential(
       } else {
         progress(`Updating ${label}…`);
         const id = change.id as string;
-        await api.updateEntity(ref, kind, id, bodyFor(change, lookup, idPatch(kind, id)), fingerprintOf(change, state));
+        await api.updateEntity(ref, kind, id, bodyFor(change, lookup, idPatch(kind, id), state), fingerprintOf(change, state));
         markApplied(applied, kind, id, change);
       }
     }

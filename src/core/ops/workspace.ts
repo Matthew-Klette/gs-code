@@ -21,7 +21,16 @@ Edit any file, then Push. Folders:
 `;
 
 /** Create a mirror for a workspace in `root` and pull it. */
+/** Web and server containers only; mobile (Android/iOS) and AMP containers have different entity models. */
+export function assertSupportedContainer(container: ContainerInfo): void {
+  const unsupported = container.usageContext.filter((context) => !['web', 'server'].includes(context));
+  if (container.usageContext.length > 0 && unsupported.length === container.usageContext.length) {
+    throw new GtmError(`${container.publicId} is a ${unsupported.join('/')} container. GS Code supports web and server containers only.`);
+  }
+}
+
 export async function initMirror(root: string, api: GtmApi, container: ContainerInfo, workspace: WorkspaceInfo): Promise<PullResult> {
+  assertSupportedContainer(container);
   if (await hasState(root)) {
     const existing = await readState(root);
     if (existing.workspace.workspaceId !== workspace.workspaceId || existing.container.containerId !== container.containerId) {
