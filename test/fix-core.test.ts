@@ -34,7 +34,8 @@ beforeEach(async () => {
 afterEach(async () => {
   await chmod(path.join(root, TAG), 0o644).catch(() => undefined);
   await chmod(path.join(root, 'tags'), 0o755).catch(() => undefined);
-  await rm(root, { recursive: true, force: true });
+  // A background check stopped mid-round may still be finishing a write in .gtm; retry instead of failing on ENOTEMPTY.
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 describe('unreadable mirror files are problems, not deletions', () => {

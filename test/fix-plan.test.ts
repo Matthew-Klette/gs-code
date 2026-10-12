@@ -10,8 +10,8 @@ import { initMirror } from '../src/core/ops/workspace';
 import { CONTAINER, seededFake, type FakeGtm } from './fakeApi';
 
 const BASE_TAG = path.join(BASE_DIR, 'tags', 'GA4 - purchase.json');
-// root ignores file modes, so chmod 000 can't make a file unreadable there.
-const canDenyRead = typeof process.getuid !== 'function' || process.getuid() !== 0;
+// chmod 000 can't make a file unreadable for root, and does nothing on Windows.
+const canDenyRead = process.platform !== 'win32' && process.getuid?.() !== 0;
 
 let root: string;
 let gtm: FakeGtm;
