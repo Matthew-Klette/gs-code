@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in GS Code (extension, gscode CLI, debugger or MCP server) does not work as described.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not paste real container data: no container or account ids, client names, tag names, URLs or tokens. Use GTM-XXXXXXX and example.com instead.
+        Security problems go to the [private advisory form](https://github.com/Matthew-Klette/gs-code/security/advisories/new), not here.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did it happen?
+      options:
+        - VS Code extension
+        - gscode CLI
+        - Debugger
+        - MCP server / Copilot tools
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. gscode pull
+        2. Edit tags/Example Tag.json
+        3. gscode push
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Error message or output
+      description: From the GS Code output channel or the terminal, with ids and names replaced.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: GS Code version
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS, VS Code and Node versions
+      placeholder: macOS 15, VS Code 1.95, Node 22
+    validations:
+      required: true
+  - type: dropdown
+    id: container
+    attributes:
+      label: Container type
+      options:
+        - Web
+        - Server
+        - Not relevant
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed container ids, account ids, client names and tokens from everything above.
+          required: true

@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write # npm provenance only
+    env:
+      # Optional: each publish step below is skipped when its secret is not set.
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Tags with a hyphen (v0.3.0-rc.1) become GitHub pre-releases and are not published anywhere else.
+      PRERELEASE: ${{ contains(github.ref_name, '-') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      - name: Check the tag matches package.json
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match package.json version ${version}." >&2
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Publish safety check (no GTM data in the repo)
+        run: npm run check:safety
+
+      - name: Build and package the VSIX
+        run: |
+          npm run package
+          echo "VSIX=$(ls gs-code-*.vsix)" >> "$GITHUB_ENV"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          flags=(--title "${GITHUB_REF_NAME}" --generate-notes --verify-tag)
+          if [ "${PRERELEASE}" = "true" ]; then flags+=(--prerelease); fi
+          gh release create "${GITHUB_REF_NAME}" "${VSIX}" "${flags[@]}"
+
+      - name: Publish to the VS Code Marketplace
+        if: env.VSCE_PAT != '' && env.PRERELEASE != 'true'
+        run: npx --no-install vsce publish --packagePath "${VSIX}" --no-dependencies
+
+      - name: Publish to Open VSX
+        if: env.OVSX_PAT != '' && env.PRERELEASE != 'true'
+        run: npx --yes ovsx@1.2.0 publish "${VSIX}" --pat "${OVSX_PAT}"
+
+      - name: Publish the gscode CLI to npm
+        if: env.NPM_TOKEN != '' && env.PRERELEASE != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

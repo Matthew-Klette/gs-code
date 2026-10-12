@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest a change or a new feature.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Please keep examples generic (GTM-XXXXXXX, example.com). No client data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it could work. Commands, settings or file formats are welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Area
+      options:
+        - VS Code extension
+        - gscode CLI
+        - Debugger
+        - MCP server / Copilot tools
+        - Docs
+        - Other

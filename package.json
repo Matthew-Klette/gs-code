@@ -2,7 +2,7 @@
   "name": "gs-code",
   "displayName": "GS Code",
   "description": "Edit an entire Google Tag Manager workspace as files in VS Code. Pull, diff, push, version and publish.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "matthew-klette",
   "author": {
     "name": "Matthew Klette"

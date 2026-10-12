@@ -191,18 +191,34 @@ GS Code is designed so that nothing reaches GTM, and nothing goes live, without 
 
 ## Settings
 
-| Setting | Default | |
-| --- | --- | --- |
-| `gsCode.protectedContainers` | `[]` | Public ids (`GTM-XXXXXXX`) where Create Version and Publish are blocked. |
-| `gsCode.allowPublish` | `true` | `false` hides Publish and, after signing in again, requests a token without the publish scope. |
-| `gsCode.pushStrategy` | `bulk` | `sequential` pushes one entity per API call: slower, but errors are reported per entity. |
+All settings live under `gsCode.*` in VS Code settings. Put `protectedContainers` and `allowPublish` in your *User* settings, not in a folder you share.
+
+| Setting | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `gsCode.protectedContainers` | string[] | `[]` | Public ids (`GTM-XXXXXXX`) where Create Version and Publish are blocked. Pull and Push still work. |
+| `gsCode.allowPublish` | boolean | `true` | Requests the `tagmanager.publish` scope at sign-in and enables Create Version and Publish. Set it to `false` and sign in again for a token that cannot publish at all. |
+| `gsCode.pushStrategy` | `bulk` \| `sequential` | `bulk` | `bulk` sends every change in one `workspaces.bulk_update` call. `sequential` uses one API call per entity: much slower under the quota, but errors are reported per entity. |
+| `gsCode.autoPull.enabled` | boolean | `true` | Checks GTM for changes on a timer, when the window gets focus and when a mirror opens, and pulls when something changed. Never sends anything to GTM and never overwrites unpushed or unsaved edits. |
+| `gsCode.autoPull.intervalSeconds` | number | `60` | Seconds between background checks (minimum 15). A check is 2 requests; at 60 s that is about 3 of the 25 requests per 100 s. |
+| `gsCode.debug.browserUrl` | string | `""` | Attach the debugger to a Chromium-based browser already running with `--remote-debugging-port`, e.g. `http://127.0.0.1:9222`. Empty: GS Code launches your installed Chrome, Edge, Brave or Chromium with its own profile. |
+| `gsCode.debug.browserPath` | string | `""` | Path of the browser to launch. Empty: the first one found. |
+| `gsCode.debug.sgtmHosts` | string[] | `[]` | Hosts of your server-side GTM (e.g. `sgtm.example.com`). Requests to these hosts, and their subdomains, are recorded as server-container hits. |
+| `gsCode.debug.loaderPatterns` | string[] | `[]` | URL patterns (with `*`) of a custom `gtm.js` loader, such as a first-party loader on your own domain. In Workspace draft mode these requests are redirected to the draft on googletagmanager.com. |
+| `gsCode.debug.dataLayerName` | string | `dataLayer` | Name of the page's data layer array, if it is not `dataLayer`. |
+| `gsCode.debug.tagStatus` | boolean | `true` | Reads each tag's status per event by adding an `eventCallback` to dataLayer events (the site's own callback still runs). Turn it off if a site's code is sensitive to that. Applies to sessions started from the Debugger panel; sessions started by an agent tool always read tag status. |
+
+The CLI does not read VS Code settings. It uses `~/.config/gs-code/config.json` (`protectedContainers`, `allowPublish`) and the environment variables below. `loaderPatterns`, `dataLayerName` and `tagStatus` have no CLI equivalent yet.
 
 ## CLI
 
 ```sh
-git clone https://github.com/Matthew-Klette/gs-code.git && cd gs-code
-npm install && npm run build && npm link      # puts `gscode` on your PATH
+npm install -g gs-code      # Node 20+, puts `gscode` on your PATH
+gscode --help
+```
 
+A typical session:
+
+```sh
 gscode login --client ~/Downloads/client_secret_XXXX.json
 gscode accounts
 gscode containers <accountId>
@@ -210,12 +226,78 @@ gscode init ./my-container --account <id> --container GTM-XXXXXXX --workspace "m
 cd my-container
 gscode status
 gscode pull
-gscode push                 # shows the changes and asks; --yes to skip
+gscode push                 # shows the changes and asks; --yes (-y) to skip the question
 gscode version --name "v42" --notes "…"                          # create a version
 gscode version --name "v42" --publish --confirm GTM-XXXXXXX      # create and publish
 ```
 
-The CLI stores credentials in `~/.config/gs-code/` (file mode 600). Protected containers: `~/.config/gs-code/config.json` → `{"protectedContainers": ["GTM-XXXXXXX"]}`, or `GSCODE_PROTECTED=GTM-A,GTM-B`.
+`[dir]` defaults to the current folder. Commands that take `--dir` use it instead of a positional folder.
+
+**Sign-in and browsing**
+
+| Command | What it does |
+| --- | --- |
+| `gscode login [--client <client_secret.json>] [--no-publish] [--manual]` | Saves the OAuth client (first time) and signs in through your browser. `--no-publish` asks for a token without the publish scope. `--manual` prints the address to open on any machine and asks you to paste the final `http://127.0.0.1:…` address back; it is used automatically over SSH, in Codespaces and dev containers, and on Linux with no display. |
+| `gscode logout [--forget-client]` | Revokes the sign-in at Google and deletes the tokens. `--forget-client` also removes the OAuth client. |
+| `gscode whoami` | Which Google account is signed in and whether it can publish (or which CI credential is in use). |
+| `gscode accounts` | Lists GTM accounts: id and name. |
+| `gscode containers <accountId>` | Lists containers: public id, numeric id, usage context, name. |
+| `gscode workspaces <accountId> <GTM-XXXXXXX\|containerId>` | Lists workspaces of a container. |
+
+**Mirror and sync**
+
+| Command | What it does |
+| --- | --- |
+| `gscode init <dir> --account <id> --container <GTM-XXXXXXX\|id> --workspace <name\|id> [--create] [--adopt]` | Creates a mirror of the workspace in `<dir>` and pulls it. `--create` creates the workspace if no workspace has that name. `--adopt` keeps mirror files already in the folder (a teammate's git clone) and links them to your workspace; without it the folder must be empty. |
+| `gscode status [dir]` | Last pull, conflicts, validation problems and the changes Push would send. |
+| `gscode pull [dir] [--no-sync]` | Brings the workspace up to the latest container version if it is behind (`workspaces.sync`), then pulls with a three-way merge. `--no-sync` pulls without updating the workspace. |
+| `gscode watch [dir] [--interval <seconds>] [--verbose]` | Keeps pulling GTM changes as they happen (default every 60 s, minimum 15). Never syncs the workspace or pushes. `--verbose` (`-v`) also prints checks that found nothing. Ctrl+C stops. |
+| `gscode push [dir] [--sequential] [--yes]` | Pulls first, stops on any conflict, shows the change list and asks, then pushes to the workspace. `--sequential` sends one call per entity. |
+| `gscode discard [dir] [--path <base>]...` | Throws local changes away. With `--path` (repeatable) only those files; without it, every change. |
+| `gscode resolve <base> (--mine \| --theirs) [--dir dir]` | Settles a local/GTM conflict on one file: keep your version or take GTM's. |
+| `gscode resolve-gtm <base> (--keep-workspace \| --latest) [--dir dir]` | Settles a GTM merge conflict between this workspace and a newer container version, then pulls. |
+| `gscode switch [dir] (--workspace <name\|id> \| --new <name>)` | Points the mirror at another workspace (after yours was versioned or deleted), or at a new one. Working files are backed up to `.gtm/backups/` first. |
+| `gscode tidy [dir]` | Renames files to match their names in GTM. |
+
+**Versions and publishing**
+
+| Command | What it does |
+| --- | --- |
+| `gscode version [dir] --name <name> [--notes <text>] [--publish --confirm <GTM-XXXXXXX>]` | Pulls (without syncing), then creates a version from the workspace. Refuses with unpushed changes. With `--publish` it also publishes, and `--confirm` must repeat the container's public id. Blocked for protected containers. |
+| `gscode publish [dir] --version <id> --confirm <GTM-XXXXXXX> [--rollback]` | Publishes an existing version. Publishing a version older than the live one needs `--rollback`. |
+| `gscode versions [dir]` | Lists container versions; `*` marks the live one. |
+| `gscode environments [dir]` | Lists environments (live, latest, workspace previews and your own). |
+
+**Debugger and agents**
+
+| Command | What it does |
+| --- | --- |
+| `gscode debug <url> [--dir dir] [--live] [--tab <url prefix>]` | Records the page in the debug browser: events, tags, consent, hits. Default is your unpublished workspace; `--live` uses the published container. `--tab` attaches to an open tab whose address starts with the prefix. While it runs: Enter reloads, `e <seq>` explains an event, `q` quits. Sessions are saved in `.gtm/debug/`. |
+| `gscode explain <seq> [tag] [--dir dir]` | Why tags fired or not on a recorded event of the latest session. |
+| `gscode mcp [--dir dir]` | MCP server on stdin/stdout for AI agents: `claude mcp add gscode -- gscode mcp`. |
+| `gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]` | Re-sends captured server-container requests into your sGTM preview. The header value comes from "Send requests manually" in sGTM preview. `--name` sends only the hits for that event name. It uses the latest recorded session. |
+| `gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]` | Runs your server container locally in Docker with Google's official image, plus a preview server. Tags that fire send real requests to vendors, so use test ids. |
+
+Any other command, or none, prints the help.
+
+### Configuration and environment variables
+
+The CLI keeps its OAuth client, tokens, rate-limit history and debug browser profile in its config folder, with files written as mode 600.
+
+| Variable | What it does |
+| --- | --- |
+| `GSCODE_CONFIG_DIR` | Config folder. Default `$XDG_CONFIG_HOME/gs-code`, else `~/.config/gs-code`. |
+| `GSCODE_PROTECTED` | Comma-separated public ids added to `protectedContainers` from `config.json`, e.g. `GSCODE_PROTECTED=GTM-XXXXXXX,GTM-YYYYYYY`. |
+| `GSCODE_AUTH=adc` | Uses Application Default Credentials instead of a browser sign-in: a service-account key file in `GOOGLE_APPLICATION_CREDENTIALS`, workload identity federation, or `gcloud auth application-default login`. Add the service account's email as a user in GTM. |
+| `GSCODE_ALLOW_PUBLISH=1` | With `GSCODE_AUTH=adc` only: also requests the publish scope. Without it, ADC tokens cannot publish. |
+| `GSCODE_ACCESS_TOKEN` | Uses this access token as is (for example one minted by an earlier CI step). Takes precedence over `GSCODE_AUTH`. |
+| `GSCODE_BROWSER_URL` | Debugger: attach to a running Chromium-based browser, e.g. `http://127.0.0.1:9222`. |
+| `GSCODE_BROWSER_PATH` | Debugger: the browser executable to launch. |
+| `GSCODE_SGTM_HOSTS` | Debugger: comma-separated server-container hosts, e.g. `sgtm.example.com`. |
+
+`config.json` example: `{"protectedContainers": ["GTM-XXXXXXX"], "allowPublish": false}`. With `allowPublish: false`, `gscode login` never requests the publish scope.
+
+Running it in CI (GitHub Actions and others) is covered in [docs/ci.md](docs/ci.md).
 
 ## How it works
 
@@ -224,25 +306,56 @@ GTM-XXXXXXX - my changes/
   tags/  triggers/  variables/  templates/  clients/  transformations/  zones/  gtag-configs/
   folders.json
   built-in-variables.json
+  .gitignore           ignores .gtm/ (written by init if there was none)
   .gtm/
-    state.json   ids + fingerprints of everything pulled
+    state.json   container, workspace, ids and fingerprints of everything pulled, conflicts, last GTM status
     base/        the last pulled copy (the left side of every diff)
-    remote/      GTM's copy of anything in conflict
+    remote/      GTM's copy of anything in conflict with your edits
+    merge/       the latest container version's copy of anything in a GTM merge conflict
+    debug/       recorded debugger sessions (.jsonl)
+    backups/     copies of your working files taken before Switch Workspace
+    lock         present while a process is pulling, pushing or versioning
 ```
 
-- **Pull** reads every entity (about 10 API calls), renders it as files and merges three ways against `.gtm/base`.
-- **Push** diffs your files against `.gtm/base`, validates references, re-reads GTM to check fingerprints, sends one bulk update, then pulls again so ids and fingerprints are current. If a push fails, nothing is half-applied: whatever didn't go through stays as a local change.
-- **Create Version** turns the workspace into a container version. GTM then deletes that workspace and starts a fresh one; GS Code follows it automatically.
-- The Tag Manager API allows 25 requests per 100 seconds per Google Cloud project. GS Code rate-limits itself (shared across CLI runs) and backs off on quota errors.
+`.gtm/` is per person and per workspace: never commit it, and don't edit it by hand. The entity files are what a team shares ([docs/team.md](docs/team.md)). The file format is in [docs/file-format.md](docs/file-format.md).
+
+- **Checking for changes** costs 2 requests: the workspace status and the latest version header. If neither moved since the last pull, nothing else is fetched.
+- **Pull** lists every entity type and the built-in variables (about 8 list requests for a web container, 10 for a server container), renders them as files and merges three ways against `.gtm/base`: untouched files update, your edits stay, and anything changed on both sides becomes a conflict with GTM's copy in `.gtm/remote/`. An explicit Pull also brings the workspace up to a newer published version first (`workspaces.sync`); GTM's own merge conflicts are recorded, with the latest version's copy in `.gtm/merge/`, and never resolved for you.
+- **Push** checks GTM (2 requests), stops on any conflict, and checks that the files still match what you confirmed. If GTM is unchanged it fetches only what the push needs instead of a full snapshot. It reads the workspace status once more right before writing and stops if anything moved, sends one `bulk_update`, then re-reads only the entity types it touched. A one-tag edit costs about 9 to 10 requests in total. What was sent is recorded in `state.json` before the refresh, so if the refresh fails the next pull finishes the job and nothing is lost.
+- **Create Version** refuses while you have unpushed changes, while a newer published version has not been pulled in, or if GTM's workspace status changed since your last pull. Then it turns the workspace into a container version. GTM replaces the workspace and GS Code follows the new one. If that fails (free accounts allow 3 workspaces), use Switch Workspace.
+- **Auto-pull** checks every 60 s by default (minimum 15), plus on window focus and when a mirror opens. After 10 checks in a row with nothing new the interval doubles, up to 4 times the setting; any change, focus or command resets it. Each delay has ±10% jitter so teammates' mirrors do not poll in step. Failed checks back off exponentially up to 10 minutes. Being signed out, a deleted workspace or the daily quota stop it until you act. Auto-pull never syncs the workspace to a newer version or writes to GTM; it tells you a version was published.
+- **Lock.** Pull, Push, Create Version, Switch Workspace and tidy take `.gtm/lock`, so the CLI, `gscode watch`, several VS Code windows and agents never write the same mirror at once. Others wait up to 30 s; a background check skips its turn instead of waiting. A lock older than 15 minutes, or held by a process that no longer exists on this machine, is ignored.
+- **Quota.** The Tag Manager API allows 25 requests per 100 seconds per Google Cloud project. GS Code paces itself with a sliding window whose request history the CLI and the extension share (`ratelimit.json` in the CLI config folder) and retries with backoff on quota errors.
 
 > **Keep mirrors of real containers out of public repos.** A mirror folder contains your container's full configuration. If you version it with git, use a private repository.
 
+How the debugger is built: [docs/debugger-design.md](docs/debugger-design.md).
+
 ## Limitations
 
+- **Desktop VS Code only.** The extension runs in the workspace extension host, so it does not work in vscode.dev or github.dev. Remote-SSH, WSL, Dev Containers and Codespaces work.
+- **Web and server containers only.** Mobile (Android / iOS) and AMP containers are refused.
 - One mirror folder per GTM workspace.
-- Google tag (gtag) configs have no name, so their files are named by type and id.
+- Google tag (gtag) configs have no name, so their files are named by id.
 - Zones are only available on GTM 360 accounts.
-- Mobile (Android / iOS) containers are not supported.
+- **Windows:** file mode 600 on the CLI's credential files does nothing, so they are protected only by your user profile's permissions. File names are capped at 120 bytes, but deep folders can still exceed the 260-character path limit; keep mirrors near the drive root or enable long paths.
+- **Server-side preview:** GS Code cannot read sGTM preview internals. It predicts which client claims a request and can replay requests into your own sGTM preview, where you see the result.
+- **Offline explanations:** trigger conditions using `cssSelector` (and other element matches) are not evaluated; the explanation says they are unknown.
+- **Variables read "now":** Custom JavaScript, JavaScript variable, cookie and DOM element variables are evaluated in the page when you ask, not at the time of the event, so their values can differ from what GTM saw.
+
+More on the debugger's limits in [docs/debugger.md](docs/debugger.md). If something goes wrong, see [docs/troubleshooting.md](docs/troubleshooting.md).
+
+## More
+
+- [docs/debugger.md](docs/debugger.md): using the debugger
+- [docs/team.md](docs/team.md): sharing a mirror through git
+- [docs/ci.md](docs/ci.md): running the CLI in CI
+- [docs/file-format.md](docs/file-format.md): the file format
+- [docs/troubleshooting.md](docs/troubleshooting.md): common problems
+- [docs/debugger-design.md](docs/debugger-design.md): how the debugger works inside
+- [SECURITY.md](SECURITY.md): reporting a vulnerability
+- [CONTRIBUTING.md](CONTRIBUTING.md): working on GS Code
+- [CHANGELOG.md](CHANGELOG.md): what changed
 
 ## Development
 
