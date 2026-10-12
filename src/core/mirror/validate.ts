@@ -1,3 +1,4 @@
+import { builtInDisplayName } from '../builtInNames';
 import { KIND_SPECS, type EntityKind } from '../kinds';
 import { docName, type EntityDoc } from '../serialize/entityFiles';
 import { collectTriggerReferences, isNameRef, isTemplateTypeRef, templateNameFromTypeRef } from '../serialize/references';
@@ -13,7 +14,8 @@ const VARIABLE_REF = /\{\{([^{}]+)\}\}/g;
 
 /**
  * Checks a working tree before push. Errors block the push; warnings are shown.
- * `builtInNames` maps enabled built-in variable types to display names (from the last pull).
+ * `builtInNames` maps built-in variable types to display names (from the last pull). Types it lacks, such as
+ * built-ins enabled locally since then, fall back to GTM's standard display names.
  */
 export function validateModel(model: MirrorModel, builtInNames: ReadonlyMap<string, string>): Issue[] {
   const docs = [...model.docs.values()];
@@ -22,12 +24,9 @@ export function validateModel(model: MirrorModel, builtInNames: ReadonlyMap<stri
   const tags = namesOf('tag');
   const templates = namesOf('template');
   const folders = new Set(model.folders.map((folder) => folder.name));
-  const variables = new Set([
-    ...namesOf('variable'),
-    ...model.builtIns.map((type) => builtInNames.get(type)).filter(isString),
-  ]);
+  const builtInDisplayNames = new Set(model.builtIns.map((type) => builtInDisplayName(type, builtInNames)).filter(isString));
+  const variables = new Set([...namesOf('variable'), ...builtInDisplayNames]);
 
-  const builtInDisplayNames = new Set(model.builtIns.map((type) => builtInNames.get(type)).filter(isString));
   return [
     ...duplicateNames(docs),
     ...duplicateFolders(model),

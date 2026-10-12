@@ -62,6 +62,19 @@
   "activationEvents": [
     "workspaceContains:**/.gtm/state.json"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In Restricted Mode GS Code shows mirrors and changes but does not push, create versions, publish, or launch or attach a debug browser. Browser, publish and protected-container settings are only read from your User settings.",
+      "restrictedConfigurations": [
+        "gsCode.debug.browserPath",
+        "gsCode.debug.browserUrl",
+        "gsCode.debug.sgtmHosts",
+        "gsCode.allowPublish",
+        "gsCode.protectedContainers"
+      ]
+    }
+  },
   "contributes": {
     "commands": [
       {
@@ -295,7 +308,8 @@
             "type": "string"
           },
           "default": [],
-          "markdownDescription": "Container public IDs (e.g. `GTM-XXXXXXX`) where **Create Version** and **Publish** are blocked. Pull and Push still work. Keep this in your User settings, not in a shared repo."
+          "markdownDescription": "Container public IDs (e.g. `GTM-XXXXXXX`) where **Create Version** and **Publish** are blocked. Pull and Push still work. Keep this in your User settings, not in a shared repo.",
+          "scope": "application"
         },
         "gsCode.pushStrategy": {
           "type": "string",
@@ -309,7 +323,8 @@
         "gsCode.allowPublish": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Request the `tagmanager.publish` OAuth scope at sign-in and enable **Create Version and Publish**. Set to `false` and sign in again for a token that cannot publish at all."
+          "markdownDescription": "Request the `tagmanager.publish` OAuth scope at sign-in and enable **Create Version and Publish**. Set to `false` and sign in again for a token that cannot publish at all.",
+          "scope": "application"
         },
         "gsCode.autoPull.enabled": {
           "type": "boolean",
@@ -325,12 +340,14 @@
         "gsCode.debug.browserUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Attach the debugger to a Chromium-based browser that already runs with `--remote-debugging-port`, e.g. `http://127.0.0.1:9222`. Empty: GS Code launches your installed Chrome, Edge, Brave or Chromium with its own profile."
+          "markdownDescription": "Attach the debugger to a Chromium-based browser that already runs with `--remote-debugging-port`, e.g. `http://127.0.0.1:9222`. Empty: GS Code launches your installed Chrome, Edge, Brave or Chromium with its own profile.",
+          "scope": "machine"
         },
         "gsCode.debug.browserPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Path to the Chromium-based browser to launch. Empty: the first one found."
+          "markdownDescription": "Path to the Chromium-based browser to launch. Empty: the first one found.",
+          "scope": "machine"
         },
         "gsCode.debug.sgtmHosts": {
           "type": "array",
@@ -421,8 +438,8 @@
       {
         "name": "gtm_status",
         "displayName": "GTM status",
-        "modelDescription": "Local changes in the open GTM mirror that Push would send, with conflicts and validation problems. Returns an `expected` signature for gtm_push.",
-        "userDescription": "Local changes in the open GTM mirror that Push would send, with conflicts and validation problems. Returns an `expected` signature for gtm_push.",
+        "modelDescription": "Local changes in the GTM mirror that Push would send, plus conflicts and validation problems. Prints an `expected` signature for gtm_push only when there are changes. No API calls.",
+        "userDescription": "Local changes in the GTM mirror that Push would send, plus conflicts and validation problems. Prints an `expected` signature for gtm_push only when there are changes. No API calls.",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gtm_status",
         "icon": "$(debug-alt)",
@@ -431,7 +448,7 @@
           "properties": {
             "dir": {
               "type": "string",
-              "description": "Mirror folder (default: the open one)"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             }
           }
         }
@@ -439,8 +456,8 @@
       {
         "name": "gtm_pull",
         "displayName": "GTM pull",
-        "modelDescription": "Pull the latest workspace contents from GTM into the mirror (three-way merge; local edits are kept).",
-        "userDescription": "Pull the latest workspace contents from GTM into the mirror (three-way merge; local edits are kept).",
+        "modelDescription": "Pull the workspace's current contents from GTM into the mirror (three-way merge; local edits are kept). It does not bring in a newer published version.",
+        "userDescription": "Pull the workspace's current contents from GTM into the mirror (three-way merge; local edits are kept). It does not bring in a newer published version.",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gtm_pull",
         "icon": "$(debug-alt)",
@@ -449,7 +466,7 @@
           "properties": {
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             }
           }
         }
@@ -467,7 +484,7 @@
           "properties": {
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             },
             "expected": {
               "type": "string",
@@ -504,7 +521,7 @@
             },
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             },
             "tab": {
               "type": "string",
@@ -533,7 +550,7 @@
             },
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             }
           }
         }
@@ -555,7 +572,7 @@
             },
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             }
           },
           "required": [
@@ -584,7 +601,7 @@
             },
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             }
           },
           "required": [
@@ -613,7 +630,7 @@
             },
             "dir": {
               "type": "string",
-              "description": "Mirror folder"
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
             }
           }
         }
@@ -621,25 +638,29 @@
       {
         "name": "debug_replay_sgtm",
         "displayName": "Replay into sGTM preview",
-        "modelDescription": "Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview, 'Send requests manually'), so they show up in that sGTM preview.",
-        "userDescription": "Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview, 'Send requests manually'), so they show up in that sGTM preview.",
+        "modelDescription": "Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview → \"Send requests manually\"), so they appear in that sGTM preview with the claiming client, tags and outgoing requests. Warning: this sends real requests to the real server container. Its tags run and send outgoing requests to vendors, so replaying a purchase can record a duplicate conversion. Replay one event name at a time, and do not repeat a replay. Only hits to the configured sgtmHosts (gsCode.debug.sgtmHosts / GSCODE_SGTM_HOSTS) and their subdomains are replayed. Pass `name`, or `all: true` to replay every captured server-container request.",
+        "userDescription": "Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview → \"Send requests manually\"), so they appear in that sGTM preview with the claiming client, tags and outgoing requests. Warning: this sends real requests to the real server container. Its tags run and send outgoing requests to vendors, so replaying a purchase can record a duplicate conversion. Replay one event name at a time, and do not repeat a replay. Only hits to the configured sgtmHosts (gsCode.debug.sgtmHosts / GSCODE_SGTM_HOSTS) and their subdomains are replayed. Pass `name`, or `all: true` to replay every captured server-container request.",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "debug_replay_sgtm",
         "icon": "$(debug-alt)",
         "inputSchema": {
           "type": "object",
           "properties": {
+            "dir": {
+              "type": "string",
+              "description": "Mirror folder: the open mirror (default) or a folder inside it"
+            },
             "header": {
               "type": "string",
               "description": "X-Gtm-Server-Preview value"
             },
             "name": {
               "type": "string",
-              "description": "Only hits for this event name"
+              "description": "Only hits for this event name, e.g. page_view"
             },
-            "dir": {
-              "type": "string",
-              "description": "Mirror folder"
+            "all": {
+              "type": "boolean",
+              "description": "Replay every captured server-container request (needed when name is not given)"
             }
           },
           "required": [

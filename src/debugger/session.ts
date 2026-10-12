@@ -4,11 +4,17 @@ import * as path from 'node:path';
 import { GtmError } from '../core/types';
 import { openBrowser, type Browser, type BrowserOptions } from './browser';
 import type { CdpEvent } from './cdp';
-import { classifyHit } from './hits';
+import { classifyHit, redactGtmAuth } from './hits';
 import { probeSource } from './probe';
 import { Timeline, type SessionRecord } from './timeline';
 
 const BINDING = '__gsCodeEmit';
+/** Largest probe message accepted from the page; the page controls the binding, so bigger ones are dropped. */
+const MAX_PROBE_PAYLOAD = 256 * 1024;
+/** Shorter credentials are only redacted as `gtm_auth=` values, so a short string can't mangle a record. */
+const MIN_REDACTED_SECRET = 8;
+const GTM_HOSTS: ReadonlySet<string> = new Set(['www.googletagmanager.com', 'googletagmanager.com']);
+const GTM_JS_PATTERNS = ['https://www.googletagmanager.com/gtm.js*', 'https://googletagmanager.com/gtm.js*'];
 
 /** Load the unpublished workspace instead of the live container (an environment's preview credentials). */
 export interface DraftPreview {
@@ -53,6 +59,8 @@ export class DebugSession extends EventEmitter {
   private ownTab = true;
   private page = 0;
   private stopped = false;
+  /** Set once appending to the session file has failed; recording carries on in memory only. */
+  private fileFailed = false;
   private readonly pendingHits = new Set<string>();
 
   constructor(private readonly options: DebugSessionOptions) {
@@ -65,6 +73,7 @@ export class DebugSession extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    checkNavigableUrl(this.options.url);
     if (this.options.logDir) {
       await fs.mkdir(this.options.logDir, { recursive: true });
       this.file = path.join(this.options.logDir, `session-${new Date().toISOString().replace(/[:.]/g, '-')}.jsonl`);
@@ -73,11 +82,28 @@ export class DebugSession extends EventEmitter {
     await this.record({ kind: 'session', t: Date.now(), url: this.options.url, mode: this.options.preview ? 'workspace' : 'live', container: this.options.container, workspace: this.options.workspace });
     this.browser = await openBrowser(this.options.browser);
     const cdp = this.browser.cdp;
-    cdp.on('event', (event: CdpEvent) => void this.onEvent(event).catch((error: unknown) => this.note('error', String(error))));
+    cdp.on('event', (event: CdpEvent) => void this.onEvent(event).catch((error: unknown) => this.reportError(error)));
     cdp.on('close', () => {
       this.stopped = true;
       this.emit('stopped');
     });
+    // A socket error would otherwise be an uncaught 'error' event: note it and treat it as a close.
+    cdp.on('error', (error: Error) => {
+      this.reportError(`The browser connection failed: ${error.message}`);
+      cdp.close();
+    });
+    try {
+      await this.attach();
+    } catch (error) {
+      // Don't leave a launched browser (or our tab in the user's browser) behind.
+      this.stopped = true;
+      await this.release().catch((releaseError: unknown) => this.reportError(`Could not close the browser: ${String(releaseError)}`));
+      throw error;
+    }
+  }
+
+  private async attach(): Promise<void> {
+    const cdp = (this.browser as Browser).cdp;
     const targetId = await this.pickTarget();
     this.targetId = targetId;
     const { sessionId } = await cdp.send<{ sessionId: string }>('Target.attachToTarget', { targetId, flatten: true });
@@ -90,7 +116,7 @@ export class DebugSession extends EventEmitter {
       source: probeSource({ binding: BINDING, dataLayerName: this.options.dataLayerName ?? 'dataLayer', tagStatus: this.options.tagStatus !== false }),
     });
     if (this.options.preview) {
-      const patterns = ['*googletagmanager.com/gtm.js*', ...(this.options.loaderPatterns ?? [])].map((urlPattern) => ({ urlPattern, requestStage: 'Request' }));
+      const patterns = [...GTM_JS_PATTERNS, ...(this.options.loaderPatterns ?? [])].map((urlPattern) => ({ urlPattern, requestStage: 'Request' }));
       await this.send('Fetch.enable', { patterns });
     }
     await this.navigate(this.options.url);
@@ -110,6 +136,7 @@ export class DebugSession extends EventEmitter {
   }
 
   async navigate(url: string): Promise<void> {
+    checkNavigableUrl(url);
     await this.send('Page.navigate', { url });
   }
 
@@ -132,6 +159,13 @@ export class DebugSession extends EventEmitter {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    if (!this.browser) return;
+    await this.release();
+    this.emit('stopped');
+  }
+
+  /** Close the browser if we launched it, else only the tab we opened (or detach from the user's tab). */
+  private async release(): Promise<void> {
     const browser = this.browser;
     if (!browser) return;
     if (browser.launched) await browser.close();
@@ -141,7 +175,6 @@ export class DebugSession extends EventEmitter {
       else if (this.sessionId) await browser.cdp.send('Target.detachFromTarget', { sessionId: this.sessionId }).catch(() => undefined);
       browser.cdp.close();
     }
-    this.emit('stopped');
   }
 
   private send<T = Record<string, unknown>>(method: string, params: Record<string, unknown> = {}): Promise<T> {
@@ -162,9 +195,14 @@ export class DebugSession extends EventEmitter {
       }
       case 'Runtime.bindingCalled': {
         if (params.name !== BINDING) return;
+        const payload = String(params.payload);
+        if (payload.length > MAX_PROBE_PAYLOAD) {
+          await this.note('warning', `Dropped a ${Math.round(payload.length / 1024)} KB probe message (limit ${MAX_PROBE_PAYLOAD / 1024} KB).`);
+          return;
+        }
         let message: unknown;
         try {
-          message = JSON.parse(String(params.payload));
+          message = JSON.parse(payload);
         } catch {
           return;
         }
@@ -204,10 +242,15 @@ export class DebugSession extends EventEmitter {
         return;
       }
       case 'Fetch.requestPaused': {
-        const request = params.request as { url: string };
-        const rewritten = this.options.preview ? draftUrl(request.url, this.options.preview, this.options.loaderPatterns ?? []) : undefined;
-        if (rewritten && rewritten !== request.url) await this.note('info', `Loading the draft workspace: ${rewritten.replace(/gtm_auth=[^&]+/, 'gtm_auth=…')}`);
-        await this.send('Fetch.continueRequest', { requestId: params.requestId, ...(rewritten ? { url: rewritten } : {}) });
+        // The request stays paused until continued, so continue it whatever happens on the way.
+        let rewritten: string | undefined;
+        try {
+          const request = params.request as { url: string };
+          rewritten = this.options.preview ? draftUrl(request.url, this.options.preview, this.options.loaderPatterns ?? []) : undefined;
+          if (rewritten && rewritten !== request.url) await this.note('info', `Loading the draft workspace: ${redactGtmAuth(rewritten)}`);
+        } finally {
+          await this.send('Fetch.continueRequest', { requestId: params.requestId, ...(rewritten ? { url: rewritten } : {}) });
+        }
       }
     }
   }
@@ -216,16 +259,52 @@ export class DebugSession extends EventEmitter {
     await this.record({ kind: 'note', t: Date.now(), level, message });
   }
 
-  private async record(record: SessionRecord): Promise<void> {
+  /** Never throws: an error that can't even be noted goes out as a 'fault' event. */
+  private reportError(error: unknown): void {
+    this.note('error', String(error)).catch((noteError: unknown) => this.emit('fault', noteError));
+  }
+
+  private async record(original: SessionRecord): Promise<void> {
+    const record = this.redact(original);
     this.timeline.apply(record);
-    if (this.file) await fs.appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8');
     this.emit('record', record);
+    if (!this.file || this.fileFailed) return;
+    try {
+      await fs.appendFile(this.file, `${JSON.stringify(record)}\n`, 'utf8');
+    } catch (error) {
+      // Keep debugging in memory rather than crash or stall the page; say so once.
+      this.fileFailed = true;
+      this.emit('fault', error);
+      await this.note('error', `Stopped writing ${this.file}: ${error instanceof Error ? error.message : String(error)}. The session continues in memory only.`);
+    }
+  }
+
+  /** Strip the draft preview credential (gtm_auth) from anything recorded, saved or shown to an agent. */
+  private redact(record: SessionRecord): SessionRecord {
+    const json = JSON.stringify(record);
+    const auth = this.options.preview?.gtmAuth;
+    let redacted = redactGtmAuth(json);
+    if (auth && auth.length >= MIN_REDACTED_SECRET) redacted = redacted.split(auth).join('…');
+    return redacted === json ? record : (JSON.parse(redacted) as SessionRecord);
   }
 }
 
+/** Only web pages: no file:, chrome:, javascript: or view-source: URLs (about:blank is allowed). */
+export function checkNavigableUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new GtmError(`Not a valid URL: ${url}`);
+  }
+  if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.href === 'about:blank') return;
+  throw new GtmError(`Only http:// and https:// pages can be debugged, not ${parsed.protocol} URLs.`);
+}
+
 /**
- * The gtm.js URL with the draft workspace's preview credentials. `gtm_cookies_win` is dropped so the URL,
- * not some old preview cookie, decides what loads. Custom loader URLs are redirected to googletagmanager.com.
+ * The gtm.js URL with the draft workspace's preview credentials. Only `id` and `l` are kept (so
+ * `gtm_cookies_win` is dropped and the URL, not some old preview cookie, decides what loads). Custom
+ * loader URLs are redirected to googletagmanager.com.
  */
 export function draftUrl(url: string, preview: DraftPreview, loaderPatterns: readonly string[]): string | undefined {
   let parsed: URL;
@@ -234,18 +313,17 @@ export function draftUrl(url: string, preview: DraftPreview, loaderPatterns: rea
   } catch {
     return undefined;
   }
-  const isGoogle = parsed.hostname.endsWith('googletagmanager.com') && parsed.pathname === '/gtm.js';
+  // Exact hosts over https only, so a look-alike host never receives the preview credentials.
+  const isGoogle = parsed.protocol === 'https:' && GTM_HOSTS.has(parsed.hostname) && parsed.pathname === '/gtm.js';
   if (isGoogle && parsed.searchParams.get('id')?.toUpperCase() !== preview.publicId.toUpperCase()) return undefined;
   if (!isGoogle && !loaderPatterns.some((pattern) => globToRegExp(pattern).test(url))) return undefined;
-  const target = isGoogle ? parsed : new URL('https://www.googletagmanager.com/gtm.js');
-  if (!isGoogle) {
-    target.searchParams.set('id', preview.publicId);
-    const layer = parsed.searchParams.get('l');
-    if (layer) target.searchParams.set('l', layer);
-  }
+  // Always a fresh Google URL carrying only id and l, whatever else the original had.
+  const target = new URL('https://www.googletagmanager.com/gtm.js');
+  target.searchParams.set('id', preview.publicId);
+  const layer = parsed.searchParams.get('l');
+  if (layer) target.searchParams.set('l', layer);
   target.searchParams.set('gtm_auth', preview.gtmAuth);
   target.searchParams.set('gtm_preview', preview.gtmPreview);
-  target.searchParams.delete('gtm_cookies_win');
   return target.toString();
 }
 

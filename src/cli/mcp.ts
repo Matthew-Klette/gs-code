@@ -21,23 +21,49 @@ export function serveMcp(toolkit: Toolkit, input: NodeJS.ReadableStream = proces
   const lines = createInterface({ input, crlfDelay: Infinity });
   lines.on('line', (line) => {
     if (!line.trim()) return;
-    let request: Request;
+    let parsed: unknown;
     try {
-      request = JSON.parse(line) as Request;
+      parsed = JSON.parse(line);
     } catch {
       send({ id: null, error: { code: -32700, message: 'Parse error' } });
       return;
     }
+    if (!isRequest(parsed)) {
+      send({ id: requestId(parsed) ?? null, error: { code: -32600, message: 'Invalid Request' } });
+      return;
+    }
+    const request = parsed;
     void handle(toolkit, request).then(
       (result) => {
         if (request.id !== undefined && request.id !== null && result !== undefined) send({ id: request.id, result });
       },
       (error: unknown) => {
-        if (request.id !== undefined && request.id !== null) send({ id: request.id, error: { code: -32603, message: error instanceof Error ? error.message : String(error) } });
+        if (request.id !== undefined && request.id !== null) send({ id: request.id, error: { code: errorCode(error), message: error instanceof Error ? error.message : String(error) } });
       },
     );
   });
   return new Promise((resolve) => lines.once('close', () => resolve()));
+}
+
+function isRequest(value: unknown): value is Request {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const { method, id, params } = value as Record<string, unknown>;
+  const validId = id === undefined || id === null || typeof id === 'string' || typeof id === 'number';
+  const validParams = params === undefined || (typeof params === 'object' && params !== null);
+  return typeof method === 'string' && validId && validParams;
+}
+
+/** The id of a malformed request, when it has a usable one, so the error can be matched to it. */
+function requestId(value: unknown): string | number | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { id } = value as Record<string, unknown>;
+  return typeof id === 'string' || typeof id === 'number' ? id : undefined;
+}
+
+/** A JSON-RPC error code carried by the thrown error (e.g. -32601), else Internal error. */
+function errorCode(error: unknown): number {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'number' && Number.isInteger(code) ? code : -32603;
 }
 
 async function handle(toolkit: Toolkit, request: Request): Promise<unknown> {

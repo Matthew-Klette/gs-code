@@ -110,9 +110,7 @@ jobs:
         run: gscode init gtm --account "${{ vars.GTM_ACCOUNT }}" --container "${{ vars.GTM_CONTAINER }}" --workspace ci --create --adopt
 
       - name: Check
-        run: |
-          gscode status gtm | tee status.txt
-          if grep -q '^error ' status.txt; then exit 1; fi
+        run: gscode status gtm
 
       - name: Push to the ci workspace
         if: github.event_name == 'push'
@@ -124,7 +122,9 @@ jobs:
 What each step does:
 
 - `gscode init … --adopt` pulls the `ci` workspace (about 10 API requests) and links the files to it.
-- `gscode status` makes no API calls. It lists the changes Push would send, conflicts, and validation problems (unknown triggers, folders, templates or `{{variables}}`, duplicate names, invalid JSON). It exits with 0 even when it finds problems, so the step looks for lines starting with `error `.
+- `gscode status` makes no API calls. It lists the changes Push would send, conflicts, and validation problems (unknown triggers, folders, templates or `{{variables}}`, duplicate names, invalid JSON, files it cannot read). When any of these would block a push (an `error` line, a file conflict or a GTM merge conflict) it ends with `Push would be blocked: fix the errors and conflicts above first.` and exits with 1, so the step fails. Warnings and pending changes alone exit with 0.
+
+  If you also want the output in a file, keep the exit code of `gscode` rather than of `tee`. GitHub's default `bash -e` shell does not set `pipefail`, so a plain `gscode status gtm | tee status.txt` always passes. Either set `shell: bash` on the step (GitHub then runs it with `-eo pipefail`), or start the script with `set -o pipefail`.
 - `gscode pull` brings the `ci` workspace up to the latest container version, then merges. If the service account only has Read permission, the update is skipped (`Note: no permission to update workspace "ci" to version N; pulled without syncing.`). Use `gscode pull --no-sync` to skip it on purpose.
 - `gscode push --yes` pulls first, stops if anything conflicts (`Resolve the conflicts above first. Nothing was sent to GTM.`), validates, then sends the changes in one bulk request. `--yes` skips the confirmation prompt, which CI cannot answer. Add `--sequential` to send one entity per request when you need to see which entity GTM rejects.
 

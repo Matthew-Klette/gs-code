@@ -13,6 +13,7 @@ import { refreshMirror, resolveGtmConflict, switchWorkspace, type GtmResolution,
 import { discardChanges, initMirror, resolveConflict, tidyFileNames } from '../core/ops/workspace';
 import { WorkspaceGoneError, type ContainerInfo, type WorkspaceInfo } from '../core/types';
 import { FileCredentialStore } from '../cli/fileStore';
+import { untrustedMessage } from './guards';
 import { autoPullConfig, dirtyOverlay, type MirrorController, type ResourceState } from './mirror';
 
 const MAX_PREVIEW_LINES = 20;
@@ -39,6 +40,13 @@ function preview(lines: readonly string[]): string {
   const shown = lines.slice(0, MAX_PREVIEW_LINES);
   const more = lines.length > shown.length ? `\n…and ${lines.length - shown.length} more` : '';
   return shown.join('\n') + more;
+}
+
+/** False (after telling the user) when the workspace is untrusted: writes to GTM need Workspace Trust. */
+function trusted(action: string): boolean {
+  const message = untrustedMessage(vscode.workspace.isTrusted, action);
+  if (message) void vscode.window.showErrorMessage(message);
+  return !message;
 }
 
 /** Run with a progress notification; errors go to a message and the output channel. */
@@ -239,6 +247,7 @@ async function openWorkspace(deps: CommandDeps): Promise<void> {
 
 /** Container versions, with the live one marked; publishing an older one is a deliberate rollback. */
 async function versions(deps: CommandDeps, arg?: unknown): Promise<void> {
+  if (!trusted('publish or roll back versions')) return;
   const controller = await pickController(deps, arg);
   const state = controller?.state;
   if (!state) return;
@@ -362,6 +371,7 @@ async function refreshBeforeWrite(deps: CommandDeps, controller: MirrorControlle
 }
 
 async function push(deps: CommandDeps, arg?: unknown): Promise<void> {
+  if (!trusted('push to GTM')) return;
   const controller = await pickController(deps, arg);
   if (!controller) return;
   await controller.refresh();
@@ -395,6 +405,7 @@ async function push(deps: CommandDeps, arg?: unknown): Promise<void> {
 }
 
 async function version(deps: CommandDeps, arg: unknown, publish: boolean): Promise<void> {
+  if (!trusted(publish ? 'publish' : 'create versions')) return;
   const controller = await pickController(deps, arg);
   if (!controller) return;
   await controller.refresh();

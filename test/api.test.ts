@@ -105,14 +105,14 @@ describe('HttpGtmApi', () => {
   it('skips server-only kinds on web containers and tolerates optional 400s', async () => {
     const { api, requests } = apiWith((url) => {
       if (url.includes('/zones') || url.includes('/gtag_config')) return { status: 400, body: { error: { message: 'not supported' } } };
-      if (url.includes('/built_in_variables')) return { status: 200, body: { builtInVariable: [{ type: 'PAGE_URL', name: 'Page URL' }] } };
+      if (url.includes('/built_in_variables')) return { status: 200, body: { builtInVariable: [{ type: 'pageUrl', name: 'Page URL' }] } };
       if (url.includes('/tags')) return { status: 200, body: { tag: [{ tagId: '1', name: 'T' }] } };
       return { status: 200, body: {} };
     });
     const snapshot = await api.fetchSnapshot(WS, ['web']);
     expect(snapshot.entities.tag).toHaveLength(1);
     expect(snapshot.entities.zone).toEqual([]);
-    expect(snapshot.builtInVariables).toEqual([{ type: 'PAGE_URL', name: 'Page URL' }]);
+    expect(snapshot.builtInVariables).toEqual([{ type: 'pageUrl', name: 'Page URL' }]);
     expect(requests.some((r) => r.url.includes('/clients'))).toBe(false);
   });
 
@@ -126,8 +126,8 @@ describe('HttpGtmApi', () => {
     await api.updateEntity(WS, 'tag', '5', { name: 'x' }, 'fp1');
     await api.deleteEntity(WS, 'trigger', '6');
     expect(await api.bulkUpdate(WS, [{ changeStatus: 'added', tag: { tagId: 'new_1' } }])).toHaveLength(1);
-    await api.enableBuiltIns(WS, ['PAGE_URL', 'CLICK_URL']);
-    await api.disableBuiltIns(WS, ['EVENT']);
+    await api.enableBuiltIns(WS, ['pageUrl', 'clickUrl']);
+    await api.disableBuiltIns(WS, ['event']);
     await api.enableBuiltIns(WS, []);
     const version = await api.createVersion(WS, 'v', 'n');
     await api.publishVersion('1', '2', '9');
@@ -136,8 +136,8 @@ describe('HttpGtmApi', () => {
       `PUT ${base}/workspaces/3/tags/5?fingerprint=fp1`,
       `DELETE ${base}/workspaces/3/triggers/6`,
       `POST ${base}/workspaces/3/bulk_update`,
-      `POST ${base}/workspaces/3/built_in_variables?type=PAGE_URL&type=CLICK_URL`,
-      `DELETE ${base}/workspaces/3/built_in_variables?type=EVENT`,
+      `POST ${base}/workspaces/3/built_in_variables?type=pageUrl&type=clickUrl`,
+      `DELETE ${base}/workspaces/3/built_in_variables?type=event`,
       `POST ${base}/workspaces/3:create_version`,
       `POST ${base}/versions/9:publish`,
     ]);

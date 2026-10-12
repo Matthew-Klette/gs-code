@@ -61,25 +61,52 @@ export interface ClassifyOptions {
   readonly sgtmHosts?: readonly string[];
 }
 
+/** True when `hostname` is one of the configured sGTM hosts or a subdomain of one. */
+export function isSgtmHost(hostname: string, sgtmHosts: readonly string[] = []): boolean {
+  const name = hostname.toLowerCase();
+  return sgtmHosts.some((entry) => {
+    const configured = entry.trim().toLowerCase();
+    return configured !== '' && (name === configured || name.endsWith(`.${configured}`));
+  });
+}
+
+/**
+ * `gtm_auth` (the workspace preview credential) as it turns up in recorded text: a query or form value
+ * (`gtm_auth=x`), the same percent-encoded once or twice inside another parameter such as `dl=` or a
+ * Referer (`gtm_auth%3Dx`, `gtm_auth%253Dx`), and a JSON property (`"gtm_auth":"x"`, also escaped inside a
+ * JSON string or percent-encoded). The value ends at the next separator, plain or encoded.
+ */
+const GTM_AUTH_PATTERNS: readonly RegExp[] = [
+  /(gtm_auth(?:=|%3D|%253D))(?:(?!%26|%2526|%23|%2523|%22|%2522)[^&#"'\s\;,<>])+/gi,
+  /(gtm_auth(?:\\?"|%22|%2522)\s*(?::|%3A|%253A)\s*(?:\\?"|%22|%2522))(?:(?!%22|%2522)[^"\\])+/gi,
+];
+
+/** Hide `gtm_auth` values in a URL, request body or serialised record (see GTM_AUTH_PATTERNS for the forms). */
+export function redactGtmAuth(text: string): string {
+  return GTM_AUTH_PATTERNS.reduce((out, pattern) => out.replace(pattern, '$1…'), text);
+}
+
 /** `undefined` for ordinary requests. */
-export function classifyHit(rawUrl: string, method: string, postData: string | undefined, t: number, options: ClassifyOptions = {}): Hit | undefined {
+export function classifyHit(rawUrl: string, method: string, rawPostData: string | undefined, t: number, options: ClassifyOptions = {}): Hit | undefined {
   let url: URL;
   try {
-    url = new URL(rawUrl);
+    url = new URL(redactGtmAuth(rawUrl));
   } catch {
     return undefined;
   }
   if (!/^https?:$/.test(url.protocol)) return undefined;
-  const isSgtmHost = (options.sgtmHosts ?? []).some((name) => url.hostname === name || url.hostname.endsWith(`.${name}`));
+  const postData = rawPostData === undefined ? undefined : redactGtmAuth(rawPostData);
+  const isSgtmHostHit = isSgtmHost(url.hostname, options.sgtmHosts);
   const rule = RULES.find((item) => item.match(url));
-  // A GA4 hit to a non-Google host is going to a server container.
-  const firstParty = isSgtmHost || (rule?.vendor === 'ga4' && !GOOGLE_HOSTS.some((name) => host(url, name)));
-  if (!rule && !isSgtmHost) return undefined;
+  // A GA4 hit to a non-Google host is probably going to a server container. This is for display only:
+  // replay into sGTM preview also requires the host to be one of the configured sgtmHosts.
+  const firstParty = isSgtmHostHit || (rule?.vendor === 'ga4' && !GOOGLE_HOSTS.some((name) => host(url, name)));
+  if (!rule && !isSgtmHostHit) return undefined;
   const events = parseEvents(url, postData);
   const first = events[0] ?? {};
   return {
     vendor: rule?.vendor ?? 'sgtm',
-    url: rawUrl,
+    url: redactGtmAuth(rawUrl),
     host: url.hostname,
     path: url.pathname,
     method,

@@ -53,9 +53,24 @@
 - GS Code Debugger panel in VS Code: event timeline, tags, hits, data model, consent, and push to dataLayer.
 - `gscode debug`, `gscode explain` and `gscode mcp`: an MCP server exposing status, pull, push and the debugger to agents. Agents cannot publish.
 - The same tools as VS Code language-model tools for Copilot agent mode; push asks for confirmation.
-- `gscode replay-sgtm`: replay captured server-container requests into your sGTM preview.
-- `gscode sgtm-local`: run the official sGTM image locally.
+- `gscode replay-sgtm`: replay captured server-container requests into your sGTM preview (only to the hosts in `GSCODE_SGTM_HOSTS`).
+- `gscode sgtm-local`: run the official sGTM image locally, on `127.0.0.1` only.
 - Requires VS Code 1.95 or later.
+
+### Fixes and hardening
+- Restricted Mode: in an untrusted folder GS Code views, diffs and pulls, but refuses Push, Create Version, Publish, Versions / Roll Back, the debug browser and the `gtm_push`, `debug_start` and `debug_replay_sgtm` agent tools.
+- `gsCode.allowPublish` and `gsCode.protectedContainers` are read from User settings only; `gsCode.debug.browserPath` and `gsCode.debug.browserUrl` are machine settings. A shared repo's settings can no longer change them.
+- Replay into sGTM preview only sends to the configured sGTM hosts, over https (http only for a configured localhost), GET or POST only. Agents must pass an event `name` or `all: true`, and VS Code asks before replaying.
+- The `gtm_auth` preview credential is redacted from session files, the timeline, hits and agent output. Draft preview only rewrites https `gtm.js` on googletagmanager.com.
+- The debugger only opens http and https pages. Oversized probe messages are dropped, a failed session-file write no longer stops debugging, and a failed start closes the browser it launched.
+- Agent tools only accept the open mirror or a folder inside it for `dir`.
+- `gscode sgtm-local` binds to `127.0.0.1`, validates ports, keeps `CONTAINER_CONFIG` out of the process list and uses a `gscode-sgtm` Docker network, so it also works on native Linux Docker.
+- `gscode status` exits 1 when a push would be blocked.
+- `.gtm/lock` is written atomically with a per-process token and a 60 s heartbeat; a crash-damaged lock is cleared after about 5 s.
+- Files that cannot be read (permissions, I/O errors, a damaged `.gtm/base`) block push instead of being treated as deleted.
+- The debugger resolves built-in variables on real mirrors (GTM returns lowerCamel types such as `pageUrl`), and `{{Display Name}}` references to built-ins enabled locally since the last pull now pass validation.
+- An invalid regex in a RegEx Table variable is explained as unknown instead of failing.
+- A failed workspace switch leaves the folder on the old workspace. Clearer messages for a corrupt `.gtm/state.json`, a mistyped manual sign-in address and a failed token save.
 
 ### Testing
 - Experimental `npm run test:live` runs real VS Code against a real mirror.

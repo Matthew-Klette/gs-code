@@ -1,7 +1,7 @@
 import { GoogleAuth, OAuth2Client, type Credentials } from 'google-auth-library';
 import type { TokenProvider } from '../api';
 import { AuthError, GtmError } from '../types';
-import { waitForLoopbackCode } from './loopback';
+import { waitForLoopbackCode, type Loopback } from './loopback';
 
 const BASE_SCOPES = [
   // openid + email: only to show which Google account is signed in.
@@ -61,8 +61,9 @@ export interface SignInOptions {
   /**
    * Ask the user for the address the browser ended on, in case the redirect cannot reach this machine.
    * Runs alongside the loopback listener; whichever finishes first wins. Resolve `undefined` to skip.
+   * Asked again, with `problem` saying why, when a pasted address is not this sign-in's redirect.
    */
-  readonly pasteRedirect?: () => Promise<string | undefined>;
+  readonly pasteRedirect?: (problem?: string) => Promise<string | undefined>;
 }
 
 /** Google only accepts http://127.0.0.1 / http://localhost redirects for Desktop clients. */
@@ -108,17 +109,37 @@ export async function signIn(store: CredentialStore, options: SignInOptions): Pr
       code_challenge_method: 'S256' as never,
     });
     await options.openBrowser(url);
-    if (options.pasteRedirect) {
-      void options.pasteRedirect().then((address) => {
-        if (address) loopback.submitRedirect(address);
-      });
-    }
+    if (options.pasteRedirect) void pasteUntilDone(loopback, options.pasteRedirect);
     const code = await loopback.code;
     const { tokens } = await oauth.getToken({ code, codeVerifier, redirect_uri: redirectUri });
     if (!tokens.refresh_token) throw new GtmError('Google did not return a refresh token. Remove the app at myaccount.google.com/permissions and sign in again.');
     await store.saveTokens(tokens);
   } finally {
     loopback.close();
+  }
+}
+
+/**
+ * Feed pasted addresses to the loopback until one is accepted, the user skips, or the sign-in ends.
+ * Never rejects: a broken prompt is not fatal, because the loopback listener is still waiting.
+ */
+async function pasteUntilDone(loopback: Loopback, ask: (problem?: string) => Promise<string | undefined>): Promise<void> {
+  let settled = false;
+  loopback.code.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  let problem: string | undefined;
+  try {
+    while (!settled) {
+      const address = await ask(problem);
+      if (!address || settled) return;
+      problem = loopback.submitRedirect(address);
+      if (!problem) return;
+    }
+  } catch (error: unknown) {
+    // The prompt itself failed (stdin closed, input box disposed). Say so; the browser redirect can still finish.
+    process.stderr.write(`Could not read the pasted address (${error instanceof Error ? error.message : String(error)}); still waiting for the browser.\n`);
   }
 }
 
@@ -167,6 +188,8 @@ export class StaticTokenProvider implements TokenProvider {
 
 export class GoogleTokenProvider implements TokenProvider {
   private client?: OAuth2Client;
+  /** Why the last save of refreshed tokens failed, if it did. Shown when the sign-in later stops working. */
+  private saveError?: string;
 
   constructor(private readonly store: CredentialStore) {}
 
@@ -181,7 +204,8 @@ export class GoogleTokenProvider implements TokenProvider {
       const message = error instanceof Error ? error.message : String(error);
       if (/invalid_grant/i.test(message)) {
         this.client = undefined;
-        throw new AuthError('Your Google sign-in expired or was revoked. Sign in again.');
+        const unsaved = this.saveError ? ` (GS Code could not save a refreshed sign-in earlier: ${this.saveError})` : '';
+        throw new AuthError(`Your Google sign-in expired or was revoked. Sign in again.${unsaved}`);
       }
       throw new GtmError(`Token refresh failed: ${message}`);
     }
@@ -214,7 +238,13 @@ export class GoogleTokenProvider implements TokenProvider {
     client.setCredentials(tokens);
     client.on('tokens', (fresh) => {
       if (this.client !== client) return; // signed out or reset while refreshing
-      this.store.saveTokens({ ...tokens, ...fresh, refresh_token: fresh.refresh_token ?? tokens.refresh_token }).catch(() => undefined);
+      this.store.saveTokens({ ...tokens, ...fresh, refresh_token: fresh.refresh_token ?? tokens.refresh_token }).then(
+        () => (this.saveError = undefined),
+        (error: unknown) => {
+          // The access token in memory still works; only the next start would use stale tokens. Keep the reason for later.
+          this.saveError = error instanceof Error ? error.message : String(error);
+        },
+      );
     });
     this.client = client;
     return client;

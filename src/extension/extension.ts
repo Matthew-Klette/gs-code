@@ -1,3 +1,4 @@
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { HttpGtmApi } from '../core/api';
@@ -10,7 +11,10 @@ import { RateLimiter } from '../core/rateLimiter';
 import { autoPullConfig, GtmDecorations, MirrorController } from './mirror';
 import { SecretCredentialStore } from './secretStore';
 import { DebugPanel, debugSettings } from './debugPanel';
-import { Toolkit } from '../debugger/toolkit';
+import type { Hit } from '../debugger/hits';
+import { Timeline } from '../debugger/timeline';
+import { DEBUG_DIR, Toolkit } from '../debugger/toolkit';
+import { containedFile, planReplay, replayConfirmation, untrustedMessage } from './guards';
 
 /** Returned from activate() so integration tests can inspect state. */
 export interface GsCodeExtensionApi {
@@ -21,6 +25,12 @@ export interface GsCodeExtensionApi {
 const FOCUS_RECHECK_MS = 10_000;
 /** How often the "synced X ago" text is redrawn. */
 const STATUS_TICK_MS = 15_000;
+/** Agent tools that write to GTM, start a browser or send requests; refused in Restricted Mode. */
+const TRUSTED_TOOLS: Readonly<Record<string, string>> = {
+  gtm_push: 'push to GTM',
+  debug_start: 'launch or attach a debug browser',
+  debug_replay_sgtm: 'replay requests to a server container',
+};
 
 export function formatAgo(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -36,9 +46,31 @@ function syncedAt(controller: MirrorController): number | undefined {
   return controller.autoPull.lastCheckedAt ?? pulled;
 }
 
+/** Which settings level gsCode.debug.sgtmHosts comes from, for the replay confirmation. */
+function sgtmHostsSource(): string {
+  const inspected = vscode.workspace.getConfiguration('gsCode.debug').inspect<string[]>('sgtmHosts');
+  if (inspected?.workspaceFolderValue !== undefined) return 'folder settings';
+  if (inspected?.workspaceValue !== undefined) return 'workspace settings';
+  if (inspected?.globalValue !== undefined) return 'user settings';
+  return 'the default';
+}
+
+/** The hits debug_replay_sgtm would read: the live session's, or the mirror's latest session file (symlinks resolved, kept inside the mirror). */
+async function replayableHits(toolkit: Toolkit, defaultRoot: string | undefined, dir: unknown): Promise<readonly Hit[]> {
+  const live = toolkit.activeSession;
+  if (live) return live.timeline.allHits();
+  if (!defaultRoot) throw new Error('no GTM mirror is open');
+  const root = typeof dir === 'string' && dir ? await containedFile(defaultRoot, dir) : defaultRoot;
+  if (!root) throw new Error('"dir" is not a folder inside the open mirror');
+  const latest = (await fs.readFile(path.join(root, DEBUG_DIR, 'latest'), 'utf8').catch(() => '')).trim();
+  const file = latest && latest === path.basename(latest) ? await containedFile(root, path.join(DEBUG_DIR, latest)) : undefined;
+  if (!file) throw new Error('no recorded debug session');
+  return (await Timeline.fromFile(file)).allHits();
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<GsCodeExtensionApi> {
   const output = vscode.window.createOutputChannel('GS Code');
-  const store = new SecretCredentialStore(context.secrets);
+  const store = new SecretCredentialStore(context.secrets, (message) => output.appendLine(message));
   const tokens = new GoogleTokenProvider(store);
   const api = new HttpGtmApi(tokens, {
     // Same request history file as the gscode CLI, so both together stay inside the 25 requests / 100 s quota.
@@ -157,9 +189,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
     const picked = await vscode.window.showQuickPick(list.map((controller) => ({ label: controller.label, root: controller.root })), { placeHolder: 'Debug which GTM workspace?' });
     return picked?.root;
   };
+  const defaultRoot = () => DebugPanel.activeRoot() ?? [...controllers.values()][0]?.root;
   const toolkit = new Toolkit({
     api,
-    defaultRoot: () => DebugPanel.activeRoot() ?? [...controllers.values()][0]?.root,
+    defaultRoot,
     browser: () => debugSettings(context).browser,
     settings: () => {
       const settings = debugSettings(context);
@@ -179,14 +212,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<GsCode
     }),
     { dispose: () => void toolkit.activeSession?.stop() },
   );
+  /** Confirmation for debug_replay_sgtm naming the exact hosts it will hit and where the allow-list came from. */
+  const prepareReplay = async (input: Readonly<Record<string, unknown>>): Promise<vscode.PreparedToolInvocation> => {
+    const name = typeof input.name === 'string' && input.name ? input.name : undefined;
+    const sgtmHosts = debugSettings(context).sgtmHosts;
+    let message: string;
+    try {
+      message = replayConfirmation(planReplay(await replayableHits(toolkit, defaultRoot(), input.dir), name, sgtmHosts), name, sgtmHosts, sgtmHostsSource());
+    } catch (error: unknown) {
+      message = `Could not list the target hosts (${error instanceof Error ? error.message : String(error)}). The replay only sends to gsCode.debug.sgtmHosts: ${sgtmHosts.join(', ') || '(empty)'}.`;
+    }
+    return { invocationMessage: 'Replaying into the sGTM preview', confirmationMessages: { title: 'Replay to the server container?', message } };
+  };
   for (const tool of toolkit.definitions()) {
     context.subscriptions.push(
       vscode.lm.registerTool<Record<string, unknown>>(tool.name, {
-        prepareInvocation: (options) =>
-          tool.name === 'gtm_push'
-            ? { invocationMessage: 'Pushing to the GTM workspace', confirmationMessages: { title: 'Push to GTM?', message: 'Send the reviewed local changes to the GTM workspace (not live).' } }
-            : { invocationMessage: `GS Code: ${tool.name.replace(/_/g, ' ')}${typeof options.input.url === 'string' ? ` ${options.input.url}` : ''}` },
+        prepareInvocation: (options) => {
+          if (tool.name === 'gtm_push') return { invocationMessage: 'Pushing to the GTM workspace', confirmationMessages: { title: 'Push to GTM?', message: 'Send the reviewed local changes to the GTM workspace (not live).' } };
+          if (tool.name === 'debug_replay_sgtm') return prepareReplay(options.input);
+          return { invocationMessage: `GS Code: ${tool.name.replace(/_/g, ' ')}${typeof options.input.url === 'string' ? ` ${options.input.url}` : ''}` };
+        },
         invoke: async (options) => {
+          const untrusted = tool.name in TRUSTED_TOOLS ? untrustedMessage(vscode.workspace.isTrusted, TRUSTED_TOOLS[tool.name]!) : undefined;
+          if (untrusted) return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(`Error: ${untrusted}`)]);
           try {
             return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(await tool.run(options.input))]);
           } catch (error: unknown) {

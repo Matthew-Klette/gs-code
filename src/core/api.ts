@@ -394,7 +394,9 @@ function toGtmError(method: Method, path: string, status: number, parsed: Record
 /** One plain sentence for the errors people actually hit; the raw API message stays underneath. */
 export function explainError(method: string, path: string, status: number, apiMessage: string): string | undefined {
   const message = apiMessage.toLowerCase();
-  if (message.includes('has not been used in project') || message.includes('accessnotconfigured') || message.includes('is disabled')) {
+  // "is disabled" alone also matches unrelated errors (a disabled tag, a disabled account); it must name the API.
+  const apiDisabled = message.includes('is disabled') && message.includes('tag manager');
+  if (message.includes('has not been used in project') || message.includes('accessnotconfigured') || apiDisabled) {
     return 'The Tag Manager API is not enabled in the Google Cloud project of your OAuth client. Enable it under APIs & Services → Library.';
   }
   if (status === 403 && /insufficient.*scope|access_token_scope_insufficient/.test(message)) {

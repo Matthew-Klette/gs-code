@@ -56,6 +56,7 @@ const HELP = `gscode: edit a Google Tag Manager workspace as files
   gscode mcp [--dir dir]             MCP server for AI agents: claude mcp add gscode -- gscode mcp
   gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]
                                      re-send captured server-container requests into your sGTM preview
+                                     (all of them without --name; only to hosts in GSCODE_SGTM_HOSTS)
   gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]
                                      run your server container locally in Docker (official image), with preview
   gscode environments [dir]          list environments (live, latest, workspace previews, your own)
@@ -134,10 +135,13 @@ async function cmdLogin(values: { client?: string; 'no-publish'?: boolean; manua
       allowPublish: !values['no-publish'] && config.allowPublish !== false,
       openBrowser: manual ? (url) => out(`Open this address in a browser on any machine and sign in:\n${url}\n`) : openBrowser,
       pasteRedirect: manual
-        ? async () => {
-            rl = createInterface({ input: process.stdin, output: process.stdout });
-            out('The browser then tries to open http://127.0.0.1:… and may show "can\'t connect". That is expected.');
-            return rl.question('Paste that whole address here: ');
+        ? async (problem) => {
+            if (problem) out(problem);
+            else {
+              rl = createInterface({ input: process.stdin, output: process.stdout });
+              out('The browser then tries to open http://127.0.0.1:… and may show "can\'t connect". That is expected.');
+            }
+            return rl?.question('Paste that whole address here: ');
           }
         : undefined,
     });
@@ -159,7 +163,7 @@ async function cmdWhoami() {
 }
 
 async function cmdInit(dir: string | undefined, values: { account?: string; container?: string; workspace?: string; create?: boolean; adopt?: boolean }) {
-  if (!dir || !values.account || !values.container || !values.workspace) throw new GtmError('Usage: gscode init <dir> --account <id> --container <GTM-XXXX|id> --workspace <name|id> [--create]');
+  if (!dir || !values.account || !values.container || !values.workspace) throw new GtmError('Usage: gscode init <dir> --account <id> --container <GTM-XXXX|id> --workspace <name|id> [--create] [--adopt]');
   const container = await resolveContainer(values.account, values.container);
   const workspaces = await api.listWorkspaces(container.accountId, container.containerId);
   let workspace = workspaces.find((w) => w.workspaceId === values.workspace || w.name === values.workspace);
@@ -185,6 +189,16 @@ async function cmdStatus(root: string) {
   else {
     out(`${countChanges(status.changes)} change(s) to push:`);
     describeChanges(status.changes).forEach((line) => out(`  ${line}`));
+  }
+  // Same blockers as push's assertReady: scripts and CI can gate on the exit code. Warnings and pending changes stay 0.
+  const blocked =
+    status.problems.length > 0 ||
+    status.issues.some((issue) => issue.severity === 'error') ||
+    state.conflicts.length > 0 ||
+    state.gtmConflicts.length > 0;
+  if (blocked) {
+    out('Push would be blocked: fix the errors and conflicts above first.');
+    process.exitCode = 1;
   }
 }
 
@@ -312,12 +326,17 @@ function toolkit(defaultRoot: string): Toolkit {
       executablePath: process.env.GSCODE_BROWSER_PATH,
       profileDir: path.join(configDir(), 'browser-profile'),
     }),
-    settings: () => ({ sgtmHosts: process.env.GSCODE_SGTM_HOSTS?.split(',').map((host) => host.trim()).filter(Boolean) }),
+    settings: () => ({ sgtmHosts: sgtmHosts() }),
   });
 }
 
+/** Server container hosts from GSCODE_SGTM_HOSTS (comma-separated). */
+function sgtmHosts(): string[] {
+  return process.env.GSCODE_SGTM_HOSTS?.split(',').map((host) => host.trim()).filter(Boolean) ?? [];
+}
+
 async function cmdDebug(url: string | undefined, values: { dir?: string; live?: boolean; tab?: string }) {
-  if (!url) throw new GtmError('Usage: gscode debug <url> [--dir dir] [--live]');
+  if (!url) throw new GtmError('Usage: gscode debug <url> [--dir dir] [--live] [--tab <url prefix>]');
   const root = path.resolve(values.dir ?? '.');
   const kit = toolkit(root);
   out(await kit.run('debug_start', { url, mode: values.live ? 'live' : 'workspace', ...(values.tab ? { tab: values.tab } : {}) }));
@@ -403,14 +422,14 @@ async function main(argv: string[]): Promise<void> {
     case 'push': return cmdPush(root, values);
     case 'discard': return out(`Discarded ${await discardChanges(root, await readState(root), values.path)} change(s).`);
     case 'resolve': {
-      if (!rest[0] || values.mine === values.theirs) throw new GtmError('Usage: gscode resolve <base> (--mine | --theirs)');
+      if (!rest[0] || values.mine === values.theirs) throw new GtmError('Usage: gscode resolve <base> (--mine | --theirs) [--dir dir]');
       const dir = path.resolve(values.dir ?? '.');
       await resolveConflict(dir, await readState(dir), rest[0], values.mine ? 'mine' : 'theirs');
       return out(`Resolved ${rest[0]}.`);
     }
     case 'resolve-gtm': {
       const keep = values['keep-workspace'] === true;
-      if (!rest[0] || keep === (values.latest === true)) throw new GtmError('Usage: gscode resolve-gtm <base> (--keep-workspace | --latest)');
+      if (!rest[0] || keep === (values.latest === true)) throw new GtmError('Usage: gscode resolve-gtm <base> (--keep-workspace | --latest) [--dir dir]');
       const dir = path.resolve(values.dir ?? '.');
       const result = await resolveGtmConflict(dir, api, await readState(dir), rest[0], keep ? 'workspace' : 'latest');
       out(`Resolved ${rest[0]} (${keep ? 'kept the workspace version' : 'took the latest version'}). ${describeRefresh(result)}`);
@@ -428,8 +447,10 @@ async function main(argv: string[]): Promise<void> {
     }
     case 'mcp': return serveMcp(toolkit(path.resolve(values.dir ?? '.')));
     case 'replay-sgtm': {
-      if (!values.header) throw new GtmError('Usage: gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]');
-      return out(await toolkit(path.resolve(values.dir ?? '.')).run('debug_replay_sgtm', { header: values.header, ...(values.name ? { name: values.name } : {}) }));
+      if (!values.header) throw new GtmError('Usage: gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir] (replays only to hosts in GSCODE_SGTM_HOSTS)');
+      if (!sgtmHosts().length) throw new GtmError('Set GSCODE_SGTM_HOSTS to your server container host(s) (e.g. sgtm.example.com). Replays only go to those hosts.');
+      // Without --name the CLI keeps its old behaviour: replay every captured server-container request.
+      return out(await toolkit(path.resolve(values.dir ?? '.')).run('debug_replay_sgtm', { header: values.header, ...(values.name ? { name: values.name } : { all: true }) }));
     }
     case 'sgtm-local': {
       if (!values.config) throw new GtmError('Usage: gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]');

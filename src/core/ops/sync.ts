@@ -3,7 +3,7 @@ import type { GtmApi } from '../api';
 import { KIND_ORDER, KIND_SPECS, type EntityKind } from '../kinds';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { allocateBase, MERGE_DIR, STATE_DIR } from '../mirror/layout';
+import { allocateBase, BUILTINS_FILE, FOLDERS_FILE, MERGE_DIR, STATE_DIR } from '../mirror/layout';
 import { withMirrorLock } from '../mirror/lock';
 import { writeDoc, type Overlay } from '../mirror/model';
 import { toLocalData } from '../serialize/entityFiles';
@@ -150,25 +150,51 @@ export interface SwitchResult extends RefreshResult {
 /**
  * Point the mirror at another workspace (after the old one was versioned or deleted, or by choice).
  * Working files are backed up first; then a full three-way pull keeps your unpushed edits.
+ * The new workspace is written to state only by a pull that succeeds: if it fails, state.json still
+ * points at the old workspace with its own entity index, so the next merge uses the right base.
  */
 export async function switchWorkspace(root: string, api: GtmApi, state: MirrorState, target: WorkspaceInfo, options: RefreshOptions = {}): Promise<SwitchResult> {
   return withMirrorLock(root, 'switch workspace', async () => {
     const backup = await backupWorkingFiles(root);
     const moved: MirrorState = { ...state, workspace: target, remote: undefined, gtmConflicts: [] };
-    await writeState(root, moved);
-    const result = await refreshLocked(root, api, moved, { ...options, force: true }, target);
-    return { ...result, backup };
+    try {
+      const result = await refreshLocked(root, api, moved, { ...options, force: true }, target);
+      return { ...result, backup };
+    } catch (error: unknown) {
+      const kept = `This folder still follows "${state.workspace.name}". Your working files were backed up to ${backup}.`;
+      // Callers branch on WorkspaceGoneError (pick another workspace from `candidates`): keep the class.
+      if (error instanceof WorkspaceGoneError) throw goneWithNote(error, kept);
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new GtmError(`Could not switch to workspace "${target.name}": ${reason} ${kept}`, error instanceof GtmError ? error.status : undefined, error);
+    }
   }, options.lockWaitMs);
+}
+
+/** A copy of `error` (same workspace, candidates and reason) whose message ends with `note`. */
+function goneWithNote(error: WorkspaceGoneError, note: string): WorkspaceGoneError {
+  const copy = new WorkspaceGoneError(error.workspace, error.candidates, error.reason);
+  copy.message = `${error.message} ${note}`;
+  return copy;
 }
 
 export const BACKUP_DIR = `${STATE_DIR}/backups`;
 
+/** What a pull can overwrite: the entity folders and the root JSON files. Never .git, node_modules or other files. */
+const MIRROR_ENTRIES: readonly string[] = [
+  ...KIND_ORDER.filter((kind) => kind !== 'folder').map((kind) => KIND_SPECS[kind].dir),
+  FOLDERS_FILE,
+  BUILTINS_FILE,
+];
+
 async function backupWorkingFiles(root: string): Promise<string> {
   const target = path.join(root, BACKUP_DIR, new Date().toISOString().replace(/[:.]/g, '-'));
   await fs.mkdir(target, { recursive: true });
-  for (const entry of await fs.readdir(root)) {
-    if (entry === STATE_DIR) continue;
-    await fs.cp(path.join(root, entry), path.join(target, entry), { recursive: true });
+  for (const entry of MIRROR_ENTRIES) {
+    try {
+      await fs.cp(path.join(root, entry), path.join(target, entry), { recursive: true });
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
   return path.relative(root, target).split(path.sep).join('/');
 }

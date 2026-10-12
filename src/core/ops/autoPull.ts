@@ -133,9 +133,14 @@ export class AutoPull {
   private schedule(delayMs: number): void {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
-      void this.check().then(() => {
-        if (this.running) this.schedule(this.nextDelay());
-      });
+      // A throwing onError/onResult callback must not end the loop: keep it as lastError and check again.
+      void this.check()
+        .catch((error: unknown) => {
+          this.lastError = error;
+        })
+        .finally(() => {
+          if (this.running) this.schedule(this.nextDelay());
+        });
     }, delayMs);
   }
 

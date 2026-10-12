@@ -99,8 +99,16 @@ export async function readState(root: string): Promise<MirrorState> {
   } catch {
     throw new GtmError(`No GTM mirror here (missing ${STATE_FILE}). Run "GS Code: Open Workspace…" or \`gscode init\` first.`);
   }
-  const parsed = JSON.parse(text) as MirrorState;
-  if (parsed.version !== 1 || !parsed.container || !parsed.workspace) {
+  let parsed: MirrorState;
+  try {
+    parsed = JSON.parse(text) as MirrorState;
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new GtmError(
+      `${STATE_FILE} is corrupt (${reason}). Restore it from version control if you track it; otherwise move this folder aside and run \`gscode init\` (or "GS Code: Open Workspace…") again. Copy any unpushed edits back afterwards.`,
+    );
+  }
+  if (!parsed || typeof parsed !== 'object' || parsed.version !== 1 || !parsed.container || !parsed.workspace) {
     throw new GtmError(`${STATE_FILE} is not a valid GTM mirror state file.`);
   }
   return {

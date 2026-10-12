@@ -33,8 +33,10 @@ Google shows **Error 400: redirect_uri_mismatch** in the browser. The client is 
 
 Google redirects to `http://127.0.0.1:…` on the machine where your browser runs, which may not be where GS Code runs. That is expected. Copy the whole address from the browser and paste it into the box GS Code shows. The CLI does this by itself over SSH, in Codespaces, in containers and on Linux without a display; force it with `gscode login --manual`.
 
+If a paste is not the right address, the sign-in keeps waiting and asks again (the CLI prints the reason first; VS Code opens the box again):
+
 - `That is not the address from the browser. Copy the whole address bar (it starts with http://127.0.0.1).`
-- `That address belongs to a different sign-in attempt. Start again.`
+- `That address belongs to a different sign-in attempt. Paste the address from this one.` It came from an older sign-in tab. Use the address from the latest one.
 - `Sign-in timed out.` Start the sign-in again.
 
 ### "Access blocked" or "has not completed the Google verification process"
@@ -53,6 +55,8 @@ Google expires refresh tokens after 7 days for **External** apps in **Testing** 
 
 The same message appears if the sign-in was revoked at myaccount.google.com/permissions.
 
+If GS Code could not save a refreshed sign-in earlier (a full disk, or the keychain refused), the message ends with the reason: `(GS Code could not save a refreshed sign-in earlier: …)`. Fix that, then sign in again.
+
 ### "Google did not return a refresh token"
 
 ```
@@ -65,6 +69,8 @@ Google did not return a refresh token. Remove the app at myaccount.google.com/pe
 - `No OAuth client configured. Run "Configure OAuth Client" first.` (CLI: `gscode login --client client_secret.json`)
 
 The CLI and VS Code keep separate sign-ins. **GS Code: Import Sign-In from gscode CLI** copies the CLI's into VS Code.
+
+If VS Code says you are not signed in although you were, check the GS Code output channel for `The stored sign-in tokens in the OS keychain could not be read (…). Treating it as missing; configure the client or sign in again to replace it.` (or the same for `OAuth client`). Sign in again, or configure the client again, to replace the damaged entry.
 
 ## Permissions (403)
 
@@ -118,6 +124,8 @@ Follow one with `gscode switch --workspace <id>`, or `gscode switch --new <name>
 
 In VS Code: **GS Code: Switch Workspace…** (offered on the warning). Your working files are backed up to `.gtm/backups/<time>/` first, then GS Code pulls the chosen workspace with a three-way merge, so unpushed edits are kept.
 
+If pulling the chosen workspace fails, the switch is undone: the folder keeps following the old workspace, and the message ends with `This folder still follows "…". Your working files were backed up to <path>.` The backup holds the entity folders, `folders.json` and `built-in-variables.json`. Fix the cause and switch again.
+
 When **you** create a version, GS Code follows the fresh workspace automatically. If that fails, the message says so: `Version N was created…, but switching this folder to a new workspace failed: … Run "Switch Workspace…" to pick the one this folder should follow.`
 
 ## MirrorBusy: another process is working on this folder
@@ -128,7 +136,13 @@ Another GS Code process (pid 12345, "pull") is working on this folder. Try again
 
 The CLI, `gscode watch`, other VS Code windows and agents take turns on a folder through `.gtm/lock`. Another process held it for more than 30 seconds. Wait for it, or stop it.
 
-A lock is ignored when its process has exited (same machine) or when it is older than 15 minutes, so a crash does not block you for long. If the folder is on a network drive used from two machines and a lock is stuck, delete `.gtm/lock`, but only when you are sure nothing else is running.
+A lock left behind by a crash clears itself:
+
+- When its process has exited on the same machine, the lock is removed at once.
+- An empty or half-written lock (the process died while creating it) is removed once it is about 5 seconds old. A fresh one that cannot be read yet gives `Another GS Code process is working on this folder. Try again when it finishes.` without a pid; try again.
+- A running operation refreshes its lock every 60 seconds, so a long push is never mistaken for a crash. A lock that has not been refreshed for 15 minutes is treated as abandoned. This covers a crash on another machine, for example when the folder is on a network drive.
+
+A process only ever removes its own lock. If a lock from another machine is stuck and you cannot wait 15 minutes, delete `.gtm/lock`, but only when you are sure nothing else is running. Files named `.gtm/lock.<id>.tmp` or `.gtm/lock.guard` are short-lived helpers and go away by themselves.
 
 ## "Behind": a newer container version was published
 
@@ -167,6 +181,38 @@ GS Code catches the common causes before anything is sent. They show in the Prob
 
 If GTM still reports a compiler error, open the workspace in Tag Manager (**Open in Tag Manager**) and press Preview: the GTM UI names the entity.
 
+## Files GS Code cannot read
+
+A file or folder in the mirror that exists but cannot be read (no permission, locked by another program such as a virus scanner, a disk error) is an error, never a deletion. It shows in `gscode status` and the Problems panel, and blocks Push:
+
+```
+error tags/GA4 - purchase.json: cannot read tags/GA4 - purchase.json: EACCES
+```
+
+The same applies to the last pulled copy in `.gtm/base/`. Without it a local entity would look new and Push would create a duplicate, so that blocks too:
+
+```
+error .gtm/base/tags/GA4 - purchase.json: cannot read tags/GA4 - purchase.json: EACCES
+```
+
+Fix the permissions (or close the program holding the file), then run the command again. `gscode status` exits with 1 while any of these remain.
+
+## A damaged `.gtm/state.json`
+
+```
+.gtm/state.json is corrupt (…). Restore it from version control if you track it; otherwise move this folder aside and run `gscode init` (or "GS Code: Open Workspace…") again. Copy any unpushed edits back afterwards.
+```
+
+`.gtm/` is not normally committed, so the usual fix is: rename the folder, `gscode init` a fresh mirror of the same workspace into an empty folder, then copy back any files you changed and had not pushed. `.gtm/state.json is not a valid GTM mirror state file.` means the file is valid JSON but not a GS Code state file; the fix is the same.
+
+## Restricted Mode (untrusted folder)
+
+```
+GS Code does not push to GTM in Restricted Mode. Trust this workspace first (Manage Workspace Trust).
+```
+
+VS Code opened the folder without trusting it. GS Code shows the mirror and its diffs, and Pull works, but it refuses to push, create versions, publish, roll back, start the debug browser, or run the agent tools `gtm_push`, `debug_start` and `debug_replay_sgtm`. The `<action>` in the message names what was refused. Choose **Manage Workspace Trust** and trust the folder if you trust its contents. See [team.md](team.md#cloned-repos-open-in-restricted-mode).
+
 ## Push problems
 
 - `GTM changed since your last pull. Nothing was pushed. Pull, resolve, then Push again:` followed by the entities. A teammate or the GTM UI changed them.
@@ -185,4 +231,26 @@ If GTM still reports a compiler error, open the workspace in Tag Manager (**Open
 
 ## Debugger
 
-See [debugger.md](debugger.md) for browser, preview and replay messages.
+See [debugger.md](debugger.md) for browser and preview messages. Others you may see:
+
+- `Only http:// and https:// pages can be debugged, not file: URLs.` (or `chrome:`, `javascript:` and so on). Debug a page served over http or https; `about:blank` is also allowed. `Not a valid URL: …` means the address could not be parsed at all.
+- `Stopped writing <session file>: <reason>. The session continues in memory only.` The session file could not be written (disk full, permissions). Recording carries on, but **Last session** and `gscode explain` after the session ends will not see the rest.
+- `Skipped N unreadable line(s) in <session file>.` A saved session file is damaged; the rest of it is still shown.
+- `Dropped a N KB probe message (limit 256 KB).` The page pushed something very large to the dataLayer; that one message is not recorded.
+- `The browser connection failed: …` The connection to the browser dropped. The session ends; start it again.
+- `.gtm/debug/latest does not name a session file (session-….jsonl).` Start a new session, or fix `latest` to name a `session-….jsonl` file in the same folder.
+- `"dir" must be the open mirror (…) or a folder inside it.` An agent passed a `dir` outside the mirror the tools work on.
+
+Replay into sGTM preview:
+
+- `Replay needs your server container host. Set gsCode.debug.sgtmHosts in VS Code or GSCODE_SGTM_HOSTS=sgtm.example.com for the CLI and MCP server.` (CLI: `Set GSCODE_SGTM_HOSTS to your server container host(s) (e.g. sgtm.example.com). Replays only go to those hosts.`)
+- `Not replaying a request to <host>: it is not one of the configured sgtmHosts (…).` The hit went to a host you have not listed, for example a GA4 hit to a first-party host. Add the host to `sgtmHosts` if it really is your server container.
+- `Not replaying http://<host>: replay uses https only (http only for a configured localhost or 127.0.0.1).`
+- `Not replaying a <METHOD> request: only GET and POST are replayed.` and `Not replaying a request to <host>: the URL carries credentials.`
+- `Pass the event name to replay (name), or all: true to replay every captured server-container request. Replays run the real server container's tags.` An agent called `debug_replay_sgtm` with neither.
+
+`gscode sgtm-local`:
+
+- `--port must be a whole number from 1 to 65535 (got …).` (or `--preview-port`), and `--port and --preview-port must be different.`
+- `Could not start docker: …. Is Docker installed and running?`
+- `Could not create the docker network "gscode-sgtm": …` Docker refused to create the network the two containers share. Check that Docker is running and that you may create networks. An existing `gscode-sgtm` network from an earlier run is reused, not an error.

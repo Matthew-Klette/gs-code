@@ -18,8 +18,11 @@ export interface Loopback {
    * Finish with the address the browser ended on (`http://127.0.0.1:PORT/?state=…&code=…`). For machines
    * the browser cannot reach (Codespaces, SSH without port forwarding, headless servers): the browser shows
    * "can't connect", and the user pastes that address instead.
+   *
+   * Returns why a paste was ignored (not an address, or from another sign-in attempt); the sign-in keeps
+   * waiting so the user can paste again. A real failure (Google returned an error) rejects `code`.
    */
-  submitRedirect(address: string): void;
+  submitRedirect(address: string): string | undefined;
   close(): void;
 }
 
@@ -79,10 +82,10 @@ export async function waitForLoopbackCode(timeoutMs = DEFAULT_TIMEOUT_MS): Promi
       try {
         params = new URL(address.trim()).searchParams;
       } catch {
-        rejectCode(new GtmError('That is not the address from the browser. Copy the whole address bar (it starts with http://127.0.0.1).'));
-        return;
+        return 'That is not the address from the browser. Copy the whole address bar (it starts with http://127.0.0.1).';
       }
-      if (accept(params) === 'stray') rejectCode(new GtmError('That address belongs to a different sign-in attempt. Start again.'));
+      if (accept(params) === 'stray') return 'That address belongs to a different sign-in attempt. Paste the address from this one.';
+      return undefined;
     },
     close: () => {
       clearTimeout(timer);

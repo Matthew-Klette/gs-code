@@ -176,7 +176,13 @@ Add an entry to create a folder, remove it to delete it, and edit it to change i
 
 ## `built-in-variables.json`
 
-The enabled built-in variables, as a JSON array of built-in variable **types**, sorted and without duplicates. Add a type to enable it, remove it to disable it. Use the type spelling that a pull writes (the API's `type` value, not the display name shown in GTM). `{{Display Name}}` references to built-ins are checked using the display names GTM reported at the last pull. So push a newly enabled built-in first, then reference it.
+The enabled built-in variables, as a JSON array of built-in variable **types**, sorted and without duplicates. Add a type to enable it, remove it to disable it. Use the type spelling that a pull writes: the API's `lowerCamel` `type` value, not the display name shown in GTM.
+
+```json
+["clickUrl", "event", "pageHostname", "pagePath", "pageUrl"]
+```
+
+`{{Display Name}}` references to built-ins are checked against the display names GTM reported at the last pull. A built-in you enabled locally since then is checked against GTM's standard display name (`pageUrl` is `{{Page URL}}`, `clickUrl` is `{{Click URL}}`), so you can enable it and reference it in the same push. Names from the last pull win over the standard ones.
 
 ## Container exports and enum spelling
 
@@ -201,5 +207,6 @@ Bookkeeping for this folder's link to one workspace. Do not edit it, and never c
 | `.gtm/merge/` | The latest version's copy of entities in a GTM merge conflict |
 | `.gtm/backups/` | Working files saved before **Switch Workspace** |
 | `.gtm/debug/` | Debugger session files ([debugger.md](debugger.md)) |
-| `.gtm/lock` | Present while a process works on the folder |
+| `.gtm/lock` | Present while a process works on the folder: its pid, host, operation, start time and a random token. A long operation refreshes the start time every 60 seconds. |
+| `.gtm/lock.<id>.tmp`, `.gtm/lock.guard` | Short-lived files used to take, refresh and release the lock. They disappear within moments; ignore them. A `lock.guard` left by a crash is ignored after 10 s. |
 | `.gtm/README.txt` | A short note on the layout |

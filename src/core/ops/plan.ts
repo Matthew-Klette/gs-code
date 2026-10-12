@@ -19,12 +19,14 @@ export interface WorkingStatus {
 export async function workingStatus(root: string, state: MirrorState): Promise<WorkingStatus> {
   const isServer = isServerContainer(state);
   const localRead = await readModel(root, isServer);
-  const base = (await readModel(path.join(root, BASE_DIR), isServer)).model;
+  const baseRead = await readModel(path.join(root, BASE_DIR), isServer);
+  const base = baseRead.model;
   const builtInNames = new Map(Object.entries(state.builtInNames));
   return {
     changes: diffModels(localRead.model, base, state),
     issues: validateModel(localRead.model, builtInNames),
-    problems: localRead.problems,
+    // An unreadable base file would make a local entity look new (a duplicate on push), so it blocks too.
+    problems: [...localRead.problems, ...baseRead.problems.map((problem) => ({ ...problem, path: `${BASE_DIR}/${problem.path}` }))],
     conflicts: state.conflicts,
     local: localRead.model,
     base,

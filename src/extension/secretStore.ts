@@ -7,10 +7,13 @@ const TOKENS_KEY = 'gsCode.tokens';
 
 /** OAuth client and tokens in the OS keychain via VS Code SecretStorage. */
 export class SecretCredentialStore implements CredentialStore {
-  constructor(private readonly secrets: vscode.SecretStorage) {}
+  constructor(
+    private readonly secrets: vscode.SecretStorage,
+    private readonly warn: (message: string) => void = (message) => console.warn(message),
+  ) {}
 
   async loadClient(): Promise<OAuthClientConfig | undefined> {
-    return parse(await this.secrets.get(CLIENT_KEY));
+    return parse(await this.secrets.get(CLIENT_KEY), 'OAuth client', this.warn);
   }
 
   async saveClient(client: OAuthClientConfig): Promise<void> {
@@ -18,7 +21,7 @@ export class SecretCredentialStore implements CredentialStore {
   }
 
   async loadTokens(): Promise<Credentials | undefined> {
-    return parse(await this.secrets.get(TOKENS_KEY));
+    return parse(await this.secrets.get(TOKENS_KEY), 'sign-in tokens', this.warn);
   }
 
   async saveTokens(tokens: Credentials): Promise<void> {
@@ -34,11 +37,13 @@ export class SecretCredentialStore implements CredentialStore {
   }
 }
 
-function parse<T>(text: string | undefined): T | undefined {
+/** Stored JSON, or undefined when missing or unreadable (with a warning, so "not signed in" is not the only clue). */
+function parse<T>(text: string | undefined, what: string, warn: (message: string) => void): T | undefined {
   if (!text) return undefined;
   try {
     return JSON.parse(text) as T;
-  } catch {
+  } catch (error: unknown) {
+    warn(`The stored ${what} in the OS keychain could not be read (${error instanceof Error ? error.message : String(error)}). Treating it as missing; configure the client or sign in again to replace it.`);
     return undefined;
   }
 }

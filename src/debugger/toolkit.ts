@@ -19,6 +19,8 @@ import { Timeline, type TimelineEvent } from './timeline';
 import { VariableResolver } from './variables';
 
 export const DEBUG_DIR = `${STATE_DIR}/debug`;
+/** Session files as DebugSession names them: `session-<ISO time with : and . as ->.jsonl`. */
+const SESSION_FILE = /^session-[\w-]+\.jsonl$/;
 
 /** JSON Schema for a tool's input (the subset MCP and VS Code language-model tools both accept). */
 export interface ToolSchema {
@@ -36,7 +38,7 @@ export interface ToolDefinition {
 
 export interface ToolkitOptions {
   readonly api: GtmApi;
-  /** The mirror folder the tools work on (an agent may pass another with `dir`). */
+  /** The mirror folder the tools work on (an agent may pass `dir` only for a folder inside it). */
   readonly defaultRoot: () => string | undefined;
   readonly browser: (root: string) => BrowserOptions;
   readonly settings?: () => { readonly sgtmHosts?: readonly string[]; readonly loaderPatterns?: readonly string[]; readonly dataLayerName?: string };
@@ -60,20 +62,20 @@ export class Toolkit {
   }
 
   definitions(): ToolDefinition[] {
-    const dir = { dir: { type: 'string', description: 'Mirror folder (default: the open one)' } } as const;
+    const dir = { dir: { type: 'string', description: 'Mirror folder: the open mirror (default) or a folder inside it' } } as const;
     return [
       {
         name: 'gtm_status',
-        description: 'Local changes in the GTM mirror that Push would send, plus conflicts and validation problems. No API calls.',
+        description: 'Local changes in the GTM mirror that Push would send, plus conflicts and validation problems. Prints an `expected` signature for gtm_push only when there are changes. No API calls.',
         inputSchema: { type: 'object', properties: { ...dir } },
-        run: async (input) => this.status(this.root(input)),
+        run: async (input) => this.status(await this.root(input)),
       },
       {
         name: 'gtm_pull',
-        description: 'Pull the latest workspace contents from GTM into the mirror (three-way merge; local edits are kept).',
+        description: 'Pull the workspace\'s current contents from GTM into the mirror (three-way merge; local edits are kept). It does not bring in a newer published version.',
         inputSchema: { type: 'object', properties: { ...dir } },
         run: async (input) => {
-          const root = this.root(input);
+          const root = await this.root(input);
           const result = await refreshMirror(root, this.options.api, await readState(root), { force: true });
           return [describeRefresh(result), ...describeConflicts(result.state)].join('\n');
         },
@@ -84,7 +86,7 @@ export class Toolkit {
           'Push the mirror\'s local changes to the GTM workspace (never live: publishing is not available to agents). Pass the `expected` signature from gtm_status so only reviewed changes are sent.',
         inputSchema: { type: 'object', properties: { ...dir, expected: { type: 'string', description: 'Signature from gtm_status' } }, required: ['expected'] },
         run: async (input) => {
-          const root = this.root(input);
+          const root = await this.root(input);
           const result = await pushWorkspace(root, this.options.api, await readState(root), { expected: String(input.expected ?? '') });
           return `Pushed ${result.pushed} change(s) to the workspace.`;
         },
@@ -103,7 +105,7 @@ export class Toolkit {
           },
           required: ['url'],
         },
-        run: async (input) => this.start(this.root(input), String(input.url), input.mode === 'live' ? 'live' : 'workspace', typeof input.tab === 'string' ? input.tab : undefined),
+        run: async (input) => this.start(await this.root(input), String(input.url), input.mode === 'live' ? 'live' : 'workspace', typeof input.tab === 'string' ? input.tab : undefined),
       },
       {
         name: 'debug_events',
@@ -122,30 +124,40 @@ export class Toolkit {
         description:
           'Why a tag fired or did not fire on an event: each firing/blocking trigger and condition with the values compared, and the mirror file to edit. Without a tag, explains every tag for the event.',
         inputSchema: { type: 'object', properties: { ...dir, seq: { type: 'number', description: 'Event sequence number' }, tag: { type: 'string', description: 'Tag name (optional)' } }, required: ['seq'] },
-        run: async (input) => this.explain(this.root(input), await this.timeline(input), Number(input.seq), typeof input.tag === 'string' ? input.tag : undefined),
+        run: async (input) => this.explain(await this.root(input), await this.timeline(input), Number(input.seq), typeof input.tag === 'string' ? input.tag : undefined),
       },
       {
         name: 'debug_hits',
         description: 'Network hits (GA4, Google Ads, Meta, server container…), optionally filtered by vendor or event name. Server-container hits include the client predicted to claim them.',
         inputSchema: { type: 'object', properties: { ...dir, vendor: { type: 'string', description: 'ga4, google-ads, meta, sgtm…' }, name: { type: 'string', description: 'Event name, e.g. purchase' } } },
-        run: async (input) => this.hits(this.root(input), await this.timeline(input), input),
+        run: async (input) => this.hits(await this.root(input), await this.timeline(input), input),
       },
       {
         name: 'debug_replay_sgtm',
         description:
-          'Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview → "Send requests manually"), so they appear in that sGTM preview with the claiming client, tags and outgoing requests.',
+          'Replay captured server-container requests with an X-Gtm-Server-Preview header (from sGTM preview → "Send requests manually"), so they appear in that sGTM preview with the claiming client, tags and outgoing requests. ' +
+          'Warning: this sends real requests to the real server container. Its tags run and send outgoing requests to vendors, so replaying a purchase can record a duplicate conversion. Replay one event name at a time, and do not repeat a replay. ' +
+          'Only hits to the configured sgtmHosts (gsCode.debug.sgtmHosts / GSCODE_SGTM_HOSTS) and their subdomains are replayed. Pass `name`, or `all: true` to replay every captured server-container request.',
         inputSchema: {
           type: 'object',
-          properties: { ...dir, header: { type: 'string', description: 'X-Gtm-Server-Preview value' }, name: { type: 'string', description: 'Only hits for this event name (optional)' } },
+          properties: {
+            ...dir,
+            header: { type: 'string', description: 'X-Gtm-Server-Preview value' },
+            name: { type: 'string', description: 'Only hits for this event name, e.g. page_view' },
+            all: { type: 'boolean', description: 'Replay every captured server-container request (needed when name is not given)' },
+          },
           required: ['header'],
         },
         run: async (input) => {
+          const name = typeof input.name === 'string' && input.name ? input.name : undefined;
+          if (!name && input.all !== true) throw new GtmError('Pass the event name to replay (name), or all: true to replay every captured server-container request. Replays run the real server container\'s tags.');
+          const sgtmHosts = this.options.settings?.().sgtmHosts ?? [];
           const timeline = await this.timeline(input);
-          const hits = timeline.allHits().filter((hit) => hit.firstParty && hit.vendor !== 'gtm' && (!input.name || hit.name === input.name));
+          const hits = timeline.allHits().filter((hit) => hit.firstParty && hit.vendor !== 'gtm' && (!name || hit.name === name));
           if (hits.length === 0) return 'No captured server-container requests to replay.';
           const lines: string[] = [];
           for (const hit of hits) {
-            const result = await replayWithPreview(hit, String(input.header));
+            const result = await replayWithPreview(hit, String(input.header), { sgtmHosts });
             lines.push(`${result.status} ${hit.method} ${hit.url.slice(0, 120)}`);
           }
           return `${lines.join('\n')}\nOpen your sGTM preview tab to see how each request was handled.`;
@@ -197,10 +209,23 @@ export class Toolkit {
     return tool.run(input);
   }
 
-  private root(input: Readonly<Record<string, unknown>>): string {
-    const root = typeof input.dir === 'string' && input.dir ? path.resolve(input.dir) : this.options.defaultRoot();
-    if (!root) throw new GtmError('No GTM mirror is open. Pass "dir", or open a mirror folder.');
-    return root;
+  /**
+   * The default mirror, or `dir` when it is inside it: agents cannot point the tools at other folders on disk.
+   * Checked on real paths, so a symlink inside the mirror can't lead out of it. Fails closed if a path can't be resolved.
+   */
+  private async root(input: Readonly<Record<string, unknown>>): Promise<string> {
+    const base = this.options.defaultRoot();
+    if (!base) throw new GtmError('No GTM mirror is open. Open a mirror folder (or run gscode with --dir).');
+    if (typeof input.dir !== 'string' || !input.dir) return base;
+    const resolvedBase = path.resolve(base);
+    const outside = () => new GtmError(`"dir" must be the open mirror (${resolvedBase}) or a folder inside it.`);
+    const lexical = path.resolve(resolvedBase, input.dir);
+    if (!isInside(resolvedBase, lexical)) throw outside();
+    const [realBase, realRoot] = await Promise.all([fs.realpath(resolvedBase), fs.realpath(lexical)]).catch((error: unknown) => {
+      throw new GtmError(`Cannot use "dir" ${input.dir}: ${error instanceof Error ? error.message : String(error)}`);
+    });
+    if (!isInside(realBase, realRoot)) throw outside();
+    return realRoot;
   }
 
   private live(): DebugSession {
@@ -249,12 +274,15 @@ export class Toolkit {
   private async timeline(input: Readonly<Record<string, unknown>>): Promise<Timeline> {
     const live = this.activeSession;
     if (live) return live.timeline;
-    const root = this.root(input);
+    const root = await this.root(input);
     const debugDir = path.join(root, DEBUG_DIR);
     const latest = (await fs.readFile(path.join(debugDir, 'latest'), 'utf8').catch(() => '')).trim();
     if (!latest) throw new GtmError('No debug session recorded yet. Start one with debug_start.');
+    if (latest !== path.basename(latest) || !SESSION_FILE.test(latest)) throw new GtmError(`${DEBUG_DIR}/latest does not name a session file (session-….jsonl).`);
+    const file = path.join(debugDir, latest);
+    await checkSessionFile(root, file);
     const docs = await loadMirrorDocs(root, await readState(root));
-    return Timeline.fromFile(path.join(debugDir, latest), docs.tagNames);
+    return Timeline.fromFile(file, docs.tagNames);
   }
 
   private events(timeline: Timeline, page?: number): string {
@@ -333,6 +361,25 @@ export class Toolkit {
       })
       .join('\n');
   }
+}
+
+/** True when `child` is `parent` or inside it (both absolute). */
+function isInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** The session file named by `latest` must be a regular file (not a symlink) that really is inside the mirror. */
+async function checkSessionFile(root: string, file: string): Promise<void> {
+  const notSession = (why: string) => new GtmError(`${DEBUG_DIR}/latest names ${path.basename(file)}, which ${why}.`);
+  const stat = await fs.lstat(file).catch((error: unknown) => {
+    throw notSession(`cannot be read (${error instanceof Error ? error.message : String(error)})`);
+  });
+  if (!stat.isFile()) throw notSession('is not a regular file');
+  const [realRoot, realFile] = await Promise.all([fs.realpath(root), fs.realpath(file)]).catch((error: unknown) => {
+    throw notSession(`cannot be resolved (${error instanceof Error ? error.message : String(error)})`);
+  });
+  if (!isInside(realRoot, realFile)) throw notSession('is outside the mirror');
 }
 
 function hitLabel(hit: Hit): string {

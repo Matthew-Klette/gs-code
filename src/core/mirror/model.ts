@@ -32,27 +32,44 @@ export const EMPTY_MODEL: MirrorModel = { docs: new Map(), folders: [], builtIns
 /** Unsaved editor contents by mirror-relative path (`tags/A.json`). They win over the file on disk. */
 export type Overlay = ReadonlyMap<string, string>;
 
+/** Only these mean "not there". Anything else (EACCES, EMFILE, EIO, a virus scanner's lock) must not read as a deletion. */
+const MISSING_CODES: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR']);
+
+function isMissing(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code !== undefined && MISSING_CODES.has(code);
+}
+
+function unreadable(relPath: string, error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return new Error(`cannot read ${relPath}: ${code ?? (error instanceof Error ? error.message : String(error))}`);
+}
+
+/** Reads a mirror file. A missing file is `undefined`; any other read error throws. */
 export function fileReader(root: string, overlay?: Overlay): ReadFile {
   return async (relPath) => {
     const unsaved = overlay?.get(relPath);
     if (unsaved !== undefined) return unsaved;
     try {
       return await fs.readFile(path.join(root, relPath), 'utf8');
-    } catch {
-      return undefined;
+    } catch (error: unknown) {
+      if (isMissing(error)) return undefined;
+      throw unreadable(relPath, error);
     }
   };
 }
 
-async function listDir(dir: string): Promise<{ files: string[]; dirs: string[] }> {
+/** Lists a mirror folder. A missing folder is empty; any other error throws. */
+async function listDir(root: string, relDir: string): Promise<{ files: string[]; dirs: string[] }> {
   try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const entries = await fs.readdir(path.join(root, relDir), { withFileTypes: true });
     return {
       files: entries.filter((entry) => entry.isFile()).map((entry) => entry.name).sort(),
       dirs: entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort(),
     };
-  } catch {
-    return { files: [], dirs: [] };
+  } catch (error: unknown) {
+    if (isMissing(error)) return { files: [], dirs: [] };
+    throw unreadable(relDir, error);
   }
 }
 
@@ -60,23 +77,35 @@ export async function readModel(root: string, isServer: boolean, overlay?: Overl
   const read = fileReader(root, overlay);
   const docs = new Map<string, EntityDoc>();
   const problems: ParseProblem[] = [];
+  const problemOf = (relPath: string, error: unknown): ParseProblem => ({
+    path: relPath,
+    message: error instanceof Error ? error.message : String(error),
+  });
+  const list = async (relDir: string) => {
+    try {
+      return await listDir(root, relDir);
+    } catch (error: unknown) {
+      problems.push(problemOf(relDir, error));
+      return { files: [], dirs: [] };
+    }
+  };
   const capture = async (relPath: string, load: () => Promise<EntityDoc>) => {
     try {
       const doc = await load();
       docs.set(doc.base, doc);
     } catch (error: unknown) {
-      problems.push({ path: relPath, message: error instanceof Error ? error.message : String(error) });
+      problems.push(problemOf(relPath, error));
     }
   };
 
   for (const kind of KIND_ORDER) {
     if (kind === 'folder') continue;
     const dir = KIND_SPECS[kind].dir;
-    const listing = await listDir(path.join(root, dir));
+    const listing = await list(dir);
     if (kind === 'template') {
       for (const name of listing.dirs) {
         const base = `${dir}/${name}`;
-        const inner = await listDir(path.join(root, base));
+        const inner = await list(base);
         await capture(`${base}/${TEMPLATE_MANIFEST}`, () => parseTemplate(base, inner.files, read, isServer));
       }
       continue;
@@ -104,7 +133,13 @@ function isFolderDoc(value: unknown): value is FolderDoc {
 }
 
 async function readJsonArray(read: ReadFile, relPath: string, problems: ParseProblem[]): Promise<unknown[]> {
-  const text = await read(relPath);
+  let text: string | undefined;
+  try {
+    text = await read(relPath);
+  } catch (error: unknown) {
+    problems.push({ path: relPath, message: error instanceof Error ? error.message : String(error) });
+    return [];
+  }
   if (text === undefined) return [];
   try {
     const value: unknown = JSON.parse(text);

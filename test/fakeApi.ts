@@ -38,12 +38,13 @@ export const CONTAINER: ContainerInfo = {
   usageContext: ['web'],
 };
 
-const BUILTIN_NAMES: Record<string, string> = { PAGE_URL: 'Page URL', PAGE_PATH: 'Page Path', EVENT: 'Event', CLICK_URL: 'Click URL' };
+/** Real GTM returns built-in types in lowerCamel (pageUrl), not the UPPER_SNAKE of older docs. */
+const BUILTIN_NAMES: Record<string, string> = { pageUrl: 'Page URL', pagePath: 'Page Path', event: 'Event', clickUrl: 'Click URL' };
 
 /** In-memory GTM workspace with fingerprints, ids and new_N resolution, enough to exercise every op. */
 export class FakeGtm implements GtmApi {
   entities: Record<EntityKind, ApiEntity[]> = Object.fromEntries(KIND_ORDER.map((kind) => [kind, []])) as unknown as Record<EntityKind, ApiEntity[]>;
-  builtIns = new Set<string>(['PAGE_URL', 'EVENT']);
+  builtIns = new Set<string>(['pageUrl', 'event']);
   workspace: WorkspaceInfo = { accountId: '100', containerId: '200', workspaceId: '7', name: 'Default Workspace' };
   calls: string[] = [];
   versions: { id: string; name: string; published: boolean }[] = [];

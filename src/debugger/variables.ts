@@ -1,4 +1,5 @@
 import type { EntityDoc } from '../core/serialize/entityFiles';
+import { normalizeBuiltInType } from '../core/builtInNames';
 import { getPath, type DataModel } from './dataModel';
 
 /** What we know about one event when explaining it. */
@@ -24,52 +25,52 @@ export interface Resolved {
 /** Evaluates JS in the page now (custom JS, JS variables, cookies, DOM): values as of now, not as of the event. */
 export type PageEvaluator = (expression: string) => Promise<unknown>;
 
-/** Built-in variable type → where GTM reads it from (data-model key, or a special source). */
+/** Built-in variable type (lowerCamel, as the GTM API returns it) → where GTM reads it from (data-model key, or a special source). */
 const BUILT_IN_KEYS: Readonly<Record<string, string>> = {
-  EVENT: 'event',
-  CLICK_ELEMENT: 'gtm.element',
-  CLICK_CLASSES: 'gtm.elementClasses',
-  CLICK_ID: 'gtm.elementId',
-  CLICK_TARGET: 'gtm.elementTarget',
-  CLICK_URL: 'gtm.elementUrl',
-  CLICK_TEXT: '@elementText',
-  FORM_ELEMENT: 'gtm.element',
-  FORM_CLASSES: 'gtm.elementClasses',
-  FORM_ID: 'gtm.elementId',
-  FORM_TARGET: 'gtm.elementTarget',
-  FORM_URL: 'gtm.elementUrl',
-  FORM_TEXT: '@elementText',
-  ERROR_MESSAGE: 'gtm.errorMessage',
-  ERROR_URL: 'gtm.errorUrl',
-  ERROR_LINE: 'gtm.errorLineNumber',
-  DEBUG_MODE: '@false',
-  NEW_HISTORY_FRAGMENT: 'gtm.newUrlFragment',
-  OLD_HISTORY_FRAGMENT: 'gtm.oldUrlFragment',
-  NEW_HISTORY_STATE: 'gtm.newHistoryState',
-  OLD_HISTORY_STATE: 'gtm.oldHistoryState',
-  NEW_HISTORY_URL: 'gtm.newUrl',
-  OLD_HISTORY_URL: 'gtm.oldUrl',
-  HISTORY_SOURCE: 'gtm.historyChangeSource',
-  SCROLL_DEPTH_THRESHOLD: 'gtm.scrollThreshold',
-  SCROLL_DEPTH_UNITS: 'gtm.scrollUnits',
-  SCROLL_DEPTH_DIRECTION: 'gtm.scrollDirection',
-  ELEMENT_VISIBILITY_RATIO: 'gtm.visibleRatio',
-  ELEMENT_VISIBILITY_TIME: 'gtm.visibleTime',
-  ELEMENT_VISIBILITY_FIRST_TIME: 'gtm.visibleFirstTime',
-  ELEMENT_VISIBILITY_RECENT_TIME: 'gtm.visibleLastTime',
-  VIDEO_PROVIDER: 'gtm.videoProvider',
-  VIDEO_URL: 'gtm.videoUrl',
-  VIDEO_TITLE: 'gtm.videoTitle',
-  VIDEO_DURATION: 'gtm.videoDuration',
-  VIDEO_PERCENT: 'gtm.videoPercent',
-  VIDEO_VISIBLE: 'gtm.videoVisible',
-  VIDEO_STATUS: 'gtm.videoStatus',
-  VIDEO_CURRENT_TIME: 'gtm.videoCurrentTime',
-  PAGE_URL: '@url',
-  PAGE_HOSTNAME: '@hostname',
-  PAGE_PATH: '@path',
-  REFERRER: '@referrer',
-  CONTAINER_ID: '@container',
+  event: 'event',
+  clickElement: 'gtm.element',
+  clickClasses: 'gtm.elementClasses',
+  clickId: 'gtm.elementId',
+  clickTarget: 'gtm.elementTarget',
+  clickUrl: 'gtm.elementUrl',
+  clickText: '@elementText',
+  formElement: 'gtm.element',
+  formClasses: 'gtm.elementClasses',
+  formId: 'gtm.elementId',
+  formTarget: 'gtm.elementTarget',
+  formUrl: 'gtm.elementUrl',
+  formText: '@elementText',
+  errorMessage: 'gtm.errorMessage',
+  errorUrl: 'gtm.errorUrl',
+  errorLine: 'gtm.errorLineNumber',
+  debugMode: '@false',
+  newHistoryFragment: 'gtm.newUrlFragment',
+  oldHistoryFragment: 'gtm.oldUrlFragment',
+  newHistoryState: 'gtm.newHistoryState',
+  oldHistoryState: 'gtm.oldHistoryState',
+  newHistoryUrl: 'gtm.newUrl',
+  oldHistoryUrl: 'gtm.oldUrl',
+  historySource: 'gtm.historyChangeSource',
+  scrollDepthThreshold: 'gtm.scrollThreshold',
+  scrollDepthUnits: 'gtm.scrollUnits',
+  scrollDepthDirection: 'gtm.scrollDirection',
+  elementVisibilityRatio: 'gtm.visibleRatio',
+  elementVisibilityTime: 'gtm.visibleTime',
+  elementVisibilityFirstTime: 'gtm.visibleFirstTime',
+  elementVisibilityRecentTime: 'gtm.visibleLastTime',
+  videoProvider: 'gtm.videoProvider',
+  videoUrl: 'gtm.videoUrl',
+  videoTitle: 'gtm.videoTitle',
+  videoDuration: 'gtm.videoDuration',
+  videoPercent: 'gtm.videoPercent',
+  videoVisible: 'gtm.videoVisible',
+  videoStatus: 'gtm.videoStatus',
+  videoCurrentTime: 'gtm.videoCurrentTime',
+  pageUrl: '@url',
+  pageHostname: '@hostname',
+  pagePath: '@path',
+  referrer: '@referrer',
+  containerId: '@container',
 };
 
 /** Resolves `{{Name}}` against the mirror's variables for one event. */
@@ -119,7 +120,8 @@ export class VariableResolver {
   }
 
   private builtIn(type: string, ctx: EventContext): Resolved {
-    const key = BUILT_IN_KEYS[type];
+    // Older mirrors and hand-written files may use UPPER_SNAKE (PAGE_URL); the API uses lowerCamel (pageUrl).
+    const key = BUILT_IN_KEYS[normalizeBuiltInType(type)];
     const url = safeUrl(ctx.pageUrl);
     switch (key) {
       case undefined:
@@ -206,7 +208,7 @@ export class VariableResolver {
   private autoEventVariable(params: Readonly<Record<string, unknown>>, ctx: EventContext): Resolved {
     const varType = String(params.varType ?? 'ELEMENT');
     const keys: Record<string, string> = { ELEMENT: 'gtm.element', CLASSES: 'gtm.elementClasses', ID: 'gtm.elementId', TARGET: 'gtm.elementTarget', URL: 'gtm.elementUrl', HISTORY_NEW_URL_FRAGMENT: 'gtm.newUrlFragment' };
-    if (varType === 'TEXT') return this.builtIn('CLICK_TEXT', ctx);
+    if (varType === 'TEXT') return this.builtIn('clickText', ctx);
     const key = keys[varType];
     if (!key) return { value: undefined, known: false, source: `auto-event ${varType} is not computed by the debugger` };
     return { value: getPath(ctx.model, key), known: true, source: `data layer "${key}"` };
@@ -220,12 +222,15 @@ export class VariableResolver {
       const key = String(row.key ?? '');
       let hit = false;
       if (regex) {
+        const pattern = params.fullMatch === 'false' ? key : `^(?:${key})$`;
+        let matcher: RegExp;
         try {
-          const pattern = params.fullMatch === 'false' ? key : `^(?:${key})$`;
-          hit = new RegExp(pattern, params.ignoreCase === 'false' ? '' : 'i').test(text);
-        } catch {
-          hit = false;
+          matcher = new RegExp(pattern, params.ignoreCase === 'false' ? '' : 'i');
+        } catch (error: unknown) {
+          // GTM would not match this row either, but "no row matched" would hide the broken pattern.
+          return { value: undefined, known: false, source: `invalid regex in row "${key}": ${error instanceof Error ? error.message : String(error)}` };
         }
+        hit = matcher.test(text);
       } else {
         hit = key === text;
       }

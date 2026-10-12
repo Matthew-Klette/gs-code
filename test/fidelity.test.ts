@@ -125,14 +125,17 @@ describe('sign-in helpers', async () => {
     expect(emailFromTokens({})).toBeUndefined();
   });
 
-  it('finishes from a pasted redirect address, and rejects one from another attempt', async () => {
+  it('finishes from a pasted redirect address, and ignores one from another attempt', async () => {
     const loop = await waitForLoopbackCode(5000);
-    loop.submitRedirect(`${loop.redirectUri}/?state=${loop.state}&code=abc`);
+    expect(loop.submitRedirect(`${loop.redirectUri}/?state=${loop.state}&code=abc`)).toBeUndefined();
     await expect(loop.code).resolves.toBe('abc');
     loop.close();
     const other = await waitForLoopbackCode(5000);
-    other.submitRedirect(`${other.redirectUri}/?state=wrong&code=abc`);
-    await expect(other.code).rejects.toThrow(/different sign-in attempt/);
+    // A stray paste is reported and never accepted; the flow keeps waiting for this attempt's redirect.
+    expect(other.submitRedirect(`${other.redirectUri}/?state=wrong&code=stray`)).toMatch(/different sign-in attempt/);
+    expect(other.submitRedirect('not an address')).toMatch(/not the address/);
+    expect(other.submitRedirect(`${other.redirectUri}/?state=${other.state}&code=right`)).toBeUndefined();
+    await expect(other.code).resolves.toBe('right');
     other.close();
   });
 });

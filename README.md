@@ -30,10 +30,10 @@ And when a tag does not fire, GTM's preview tells you *that* it did not, not *wh
 
 Before you point it at a real container:
 
-- **Scopes requested:** `tagmanager.readonly`, `tagmanager.edit.containers`, `tagmanager.edit.containerversions`, and `tagmanager.publish` only if publishing is enabled. Set `gsCode.allowPublish: false` and the publish scope is never requested.
+- **Scopes requested:** `openid` and `email` (only to show which account is signed in), `tagmanager.readonly`, `tagmanager.edit.containers`, `tagmanager.edit.containerversions`, and `tagmanager.publish` only if publishing is enabled. Set `gsCode.allowPublish: false` and the publish scope is never requested.
 - **Where pushes go:** into a GTM *workspace*, never the live container. Publishing is a separate command that makes you type the container id.
-- **Where your tokens live:** your OS keychain (VS Code SecretStorage), or `~/.config/gs-code/` with file mode 600 for the CLI.
-- **Who it talks to:** the Tag Manager API on `googleapis.com`, through your own OAuth client. The debugger drives a browser on your machine, and only sends requests to your own server container when you ask it to replay one. No server of mine, no analytics, no telemetry, no paid service anywhere.
+- **Where your tokens live:** your OS keychain (VS Code SecretStorage), or `~/.config/gs-code/` for the CLI, where `client.json` and `tokens.json` have file mode 600.
+- **Who it talks to:** the Tag Manager API on `googleapis.com` and Google's OAuth endpoints, through your own OAuth client. The debugger drives a browser on your machine, and only sends requests to your own server container (a host you list in `gsCode.debug.sgtmHosts`) when you ask it to replay one. No server of mine, no analytics, no telemetry, no paid service anywhere.
 - **Try it safely first:** set `allowPublish` to `false`, sign in, and open a new workspace on a test container. Pull and look around before you push anything.
 
 ## What it does
@@ -44,7 +44,7 @@ Before you point it at a real container:
 | **Names, not ids** | `"firingTriggers": ["CE - purchase"]`, `"folder": "GA4"`, `"type": "template:Meta CAPI"`. Create a trigger and the tag that uses it in one go; ids are resolved for you on push. |
 | **Real code files** | Custom HTML tags get a `.html` file, Custom JavaScript variables a `.js` file, custom templates are split into `code.js`, `parameters.json`, `permissions.json`, `info.json`, `tests.yaml`. |
 | **Source Control view** | Every change listed, click for a side-by-side diff against GTM, M/A/D badges in the Explorer, inline change markers in the editor gutter. |
-| **Validation before push** | Unknown triggers, folders or templates, duplicate names and broken JSON show up in the Problems panel, and block the push. |
+| **Validation before push** | Unknown triggers, folders or templates, duplicate names, broken JSON and files that cannot be read show up in the Problems panel, and block the push. |
 | **Safe sync** | Pull is a three-way merge: untouched files update, your edits are kept, anything changed both locally and in GTM becomes a conflict you resolve (Keep Mine / Take Theirs). Push re-checks GTM first and refuses to overwrite a change someone made since your last pull. |
 | **Fast pushes** | All changes go in one `workspaces.bulk_update` call (GTM allows only 0.25 API requests per second). |
 | **Versions and publishing** | Create Version, or Create Version and Publish, with a typed container-id confirmation, a blocklist for containers you never want published from here, and a no-publish sign-in mode. |
@@ -79,7 +79,7 @@ GS Code talks to the Tag Manager API with **your** Google account through **your
 
 Command Palette (`⇧⌘P` / `Ctrl+Shift+P`) → **GS Code: Configure OAuth Client** → pick the downloaded JSON → **Sign In**.
 
-Google shows "Google hasn't verified this app" because the app is yours and in testing mode; choose **Continue**. Credentials are stored in your OS keychain (VS Code SecretStorage). The status bar tooltip shows which Google account is signed in.
+Google shows "Google hasn't verified this app" because the app is yours and in testing mode; choose **Continue**. Credentials are stored in your OS keychain (VS Code SecretStorage). Once a mirror is open, the status bar tooltip shows which Google account is signed in.
 
 Working over **Remote-SSH, WSL, a Dev Container or Codespaces**? Sign-in works there too. If the browser ends on a "can't connect" page, paste that page's address into the box GS Code shows. **Sign Out** revokes the sign-in at Google; **Remove OAuth Client** forgets the client as well.
 
@@ -98,9 +98,9 @@ A folder named `GTM-XXXXXXX - Workspace name` is created and pulled. Open it; th
 | See what you changed | Source Control view → **GS Code** |
 | Compare a file with GTM | Click it in the Source Control view |
 | Get changes made in GTM | Automatic (auto-pull checks every minute), or **Pull** (☁↓) to also bring the workspace up to a newly published version |
-| Send your changes to GTM | **Push** (☁↑) – shows the list and asks first |
+| Send your changes to GTM | **Push** (☁↑): shows the list and asks first |
 | Throw away a change | ↶ next to the file, or **Discard Changes** |
-| Settle a conflict | Right-click it → **Keep Mine** / **Take Theirs** |
+| Settle a conflict | Right-click it → **Resolve Conflict: Keep Mine** / **Resolve Conflict: Take Theirs** |
 | Test your changes on your site | **Open Debugger** (bug icon), enter a URL, **Start** |
 | Make a version | `…` → **Create Version** |
 | Go live | `…` → **Create Version and Publish** (type the container id to confirm) |
@@ -161,7 +161,7 @@ Files copied from a container export are fine: export-style spellings like `TEMP
 - every dataLayer event, with what was pushed and the data model after it;
 - each tag's status as GTM reports it, and for every tag **why** it fired or not: the trigger, each condition with the value it compared, blocking triggers, consent, pause and schedule, with links to the files;
 - consent state per event and every measurement hit (GA4, Google Ads, Meta, server container…) with its parameters;
-- server containers: requests to your sGTM with the client predicted to claim them, and a replay into your own sGTM preview.
+- server containers: requests to your sGTM with the client predicted to claim them, and a replay into your own sGTM preview (only to the hosts in `gsCode.debug.sgtmHosts`; replayed requests run your server container's tags for real).
 
 Fix a file, Push, press **Reload**: the draft picks up the change. Details and settings: [docs/debugger.md](docs/debugger.md).
 
@@ -181,8 +181,9 @@ GS Code is designed so that nothing reaches GTM, and nothing goes live, without 
 - **Push** always shows the full list of changes and asks before sending. It goes to a **workspace**, never live.
 - **Conflicts** are detected with GTM's own fingerprints. If anyone changed an entity in GTM since your last pull, Push stops.
 - **Publish** needs you to type the container's public id (`GTM-XXXXXXX`) every time.
-- **`gsCode.protectedContainers`** blocks Create Version and Publish for the containers you list (Pull and Push still work). Keep it in your *User* settings.
-- **`gsCode.allowPublish: false`** + sign in again = a token that physically cannot publish (the `tagmanager.publish` scope is never requested).
+- **`gsCode.protectedContainers`** blocks Create Version and Publish for the containers you list (Pull and Push still work). It is read from your *User* settings only, so a shared folder cannot change it.
+- **`gsCode.allowPublish: false`** + sign in again = a token that physically cannot publish (the `tagmanager.publish` scope is never requested). Also User settings only.
+- **Restricted Mode.** In a folder you have not trusted, GS Code only shows and pulls. Push, Create Version, Publish, Versions / Roll Back, starting the debug browser and the agent tools `gtm_push`, `debug_start` and `debug_replay_sgtm` are refused until you trust the folder.
 - **Push sends exactly what you confirmed.** If an editor, an agent or another window changes a file between your confirmation and the push, nothing is sent.
 - **Versions contain exactly what you reviewed.** Create Version re-checks GTM first and refuses if the workspace changed since your last pull. Publishing never rolls back a newer live version unless you choose Roll Back.
 - **Background checks never write to GTM.** A newly published version is announced; the workspace is only updated when you Pull.
@@ -191,18 +192,22 @@ GS Code is designed so that nothing reaches GTM, and nothing goes live, without 
 
 ## Settings
 
-All settings live under `gsCode.*` in VS Code settings. Put `protectedContainers` and `allowPublish` in your *User* settings, not in a folder you share.
+All settings live under `gsCode.*` in VS Code settings. Some can only be set in certain places:
+
+- `allowPublish` and `protectedContainers` are read from your *User* settings only. A value in a shared repo's `.vscode/settings.json` is ignored, so each person sets their own.
+- `debug.browserPath` and `debug.browserUrl` are machine settings: set them in User settings (or the remote's settings when working remotely). Workspace values are ignored.
+- In Restricted Mode (an untrusted folder) a workspace value of `debug.sgtmHosts` is ignored until you trust the folder.
 
 | Setting | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `gsCode.protectedContainers` | string[] | `[]` | Public ids (`GTM-XXXXXXX`) where Create Version and Publish are blocked. Pull and Push still work. |
-| `gsCode.allowPublish` | boolean | `true` | Requests the `tagmanager.publish` scope at sign-in and enables Create Version and Publish. Set it to `false` and sign in again for a token that cannot publish at all. |
+| `gsCode.protectedContainers` | string[] | `[]` | Public ids (`GTM-XXXXXXX`) where Create Version and Publish are blocked. Pull and Push still work. User settings only. |
+| `gsCode.allowPublish` | boolean | `true` | Requests the `tagmanager.publish` scope at sign-in and enables the **Create Version and Publish** command and publishing from **Versions / Roll Back**. **Create Version** alone always works. Set it to `false` and sign in again for a token that cannot publish at all. User settings only. |
 | `gsCode.pushStrategy` | `bulk` \| `sequential` | `bulk` | `bulk` sends every change in one `workspaces.bulk_update` call. `sequential` uses one API call per entity: much slower under the quota, but errors are reported per entity. |
 | `gsCode.autoPull.enabled` | boolean | `true` | Checks GTM for changes on a timer, when the window gets focus and when a mirror opens, and pulls when something changed. Never sends anything to GTM and never overwrites unpushed or unsaved edits. |
 | `gsCode.autoPull.intervalSeconds` | number | `60` | Seconds between background checks (minimum 15). A check is 2 requests; at 60 s that is about 3 of the 25 requests per 100 s. |
-| `gsCode.debug.browserUrl` | string | `""` | Attach the debugger to a Chromium-based browser already running with `--remote-debugging-port`, e.g. `http://127.0.0.1:9222`. Empty: GS Code launches your installed Chrome, Edge, Brave or Chromium with its own profile. |
-| `gsCode.debug.browserPath` | string | `""` | Path of the browser to launch. Empty: the first one found. |
-| `gsCode.debug.sgtmHosts` | string[] | `[]` | Hosts of your server-side GTM (e.g. `sgtm.example.com`). Requests to these hosts, and their subdomains, are recorded as server-container hits. |
+| `gsCode.debug.browserUrl` | string | `""` | Attach the debugger to a Chromium-based browser already running with `--remote-debugging-port`, e.g. `http://127.0.0.1:9222`. Empty: GS Code launches your installed Chrome, Edge, Brave or Chromium with its own profile. Machine setting (User or remote settings). |
+| `gsCode.debug.browserPath` | string | `""` | Path of the browser to launch. Empty: the first one found. Machine setting (User or remote settings). |
+| `gsCode.debug.sgtmHosts` | string[] | `[]` | Hosts of your server-side GTM (e.g. `sgtm.example.com`). Requests to these hosts, and their subdomains, are recorded as server-container hits. Replay into sGTM preview only sends to these hosts, and needs at least one. |
 | `gsCode.debug.loaderPatterns` | string[] | `[]` | URL patterns (with `*`) of a custom `gtm.js` loader, such as a first-party loader on your own domain. In Workspace draft mode these requests are redirected to the draft on googletagmanager.com. |
 | `gsCode.debug.dataLayerName` | string | `dataLayer` | Name of the page's data layer array, if it is not `dataLayer`. |
 | `gsCode.debug.tagStatus` | boolean | `true` | Reads each tag's status per event by adding an `eventCallback` to dataLayer events (the site's own callback still runs). Turn it off if a site's code is sensitive to that. Applies to sessions started from the Debugger panel; sessions started by an agent tool always read tag status. |
@@ -249,7 +254,7 @@ gscode version --name "v42" --publish --confirm GTM-XXXXXXX      # create and pu
 | Command | What it does |
 | --- | --- |
 | `gscode init <dir> --account <id> --container <GTM-XXXXXXX\|id> --workspace <name\|id> [--create] [--adopt]` | Creates a mirror of the workspace in `<dir>` and pulls it. `--create` creates the workspace if no workspace has that name. `--adopt` keeps mirror files already in the folder (a teammate's git clone) and links them to your workspace; without it the folder must be empty. |
-| `gscode status [dir]` | Last pull, conflicts, validation problems and the changes Push would send. |
+| `gscode status [dir]` | Last pull, conflicts, validation problems and the changes Push would send. Exits with code 1 when a push would be blocked (parse errors, validation errors, conflicts or GTM merge conflicts); warnings and pending changes exit 0. |
 | `gscode pull [dir] [--no-sync]` | Brings the workspace up to the latest container version if it is behind (`workspaces.sync`), then pulls with a three-way merge. `--no-sync` pulls without updating the workspace. |
 | `gscode watch [dir] [--interval <seconds>] [--verbose]` | Keeps pulling GTM changes as they happen (default every 60 s, minimum 15). Never syncs the workspace or pushes. `--verbose` (`-v`) also prints checks that found nothing. Ctrl+C stops. |
 | `gscode push [dir] [--sequential] [--yes]` | Pulls first, stops on any conflict, shows the change list and asks, then pushes to the workspace. `--sequential` sends one call per entity. |
@@ -275,14 +280,14 @@ gscode version --name "v42" --publish --confirm GTM-XXXXXXX      # create and pu
 | `gscode debug <url> [--dir dir] [--live] [--tab <url prefix>]` | Records the page in the debug browser: events, tags, consent, hits. Default is your unpublished workspace; `--live` uses the published container. `--tab` attaches to an open tab whose address starts with the prefix. While it runs: Enter reloads, `e <seq>` explains an event, `q` quits. Sessions are saved in `.gtm/debug/`. |
 | `gscode explain <seq> [tag] [--dir dir]` | Why tags fired or not on a recorded event of the latest session. |
 | `gscode mcp [--dir dir]` | MCP server on stdin/stdout for AI agents: `claude mcp add gscode -- gscode mcp`. |
-| `gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]` | Re-sends captured server-container requests into your sGTM preview. The header value comes from "Send requests manually" in sGTM preview. `--name` sends only the hits for that event name. It uses the latest recorded session. |
-| `gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]` | Runs your server container locally in Docker with Google's official image, plus a preview server. Tags that fire send real requests to vendors, so use test ids. |
+| `gscode replay-sgtm --header <X-Gtm-Server-Preview> [--name <event>] [--dir dir]` | Re-sends captured server-container requests into your sGTM preview. The header value comes from "Send requests manually" in sGTM preview. `--name` sends only the hits for that event name; without it, every captured server-container request is replayed. It uses the latest recorded session and needs `GSCODE_SGTM_HOSTS`: only requests to those hosts (and their subdomains) are sent, over https (plain http only for a listed `localhost` or `127.0.0.1`), GET or POST only. The requests are real: your server container's tags run and vendors receive them, so replaying a purchase can record a duplicate conversion. |
+| `gscode sgtm-local --config <CONTAINER_CONFIG> [--port 8080] [--preview-port 8081]` | Runs your server container locally in Docker with Google's official image, plus a preview server. Both ports are published on `127.0.0.1` only, must be 1 to 65535 and must differ. The two containers share a Docker network named `gscode-sgtm`, which is created on first use and left in place after Ctrl+C (remove it with `docker network rm gscode-sgtm`). Works with Docker Desktop and native Linux Docker. Tags that fire send real requests to vendors, so use test ids. |
 
 Any other command, or none, prints the help.
 
 ### Configuration and environment variables
 
-The CLI keeps its OAuth client, tokens, rate-limit history and debug browser profile in its config folder, with files written as mode 600.
+The CLI keeps its OAuth client, tokens, rate-limit history and debug browser profile in its config folder. The folder is created with mode 700, and `client.json`, `tokens.json` and `ratelimit.json` are written with mode 600.
 
 | Variable | What it does |
 | --- | --- |
@@ -293,7 +298,7 @@ The CLI keeps its OAuth client, tokens, rate-limit history and debug browser pro
 | `GSCODE_ACCESS_TOKEN` | Uses this access token as is (for example one minted by an earlier CI step). Takes precedence over `GSCODE_AUTH`. |
 | `GSCODE_BROWSER_URL` | Debugger: attach to a running Chromium-based browser, e.g. `http://127.0.0.1:9222`. |
 | `GSCODE_BROWSER_PATH` | Debugger: the browser executable to launch. |
-| `GSCODE_SGTM_HOSTS` | Debugger: comma-separated server-container hosts, e.g. `sgtm.example.com`. |
+| `GSCODE_SGTM_HOSTS` | Debugger: comma-separated server-container hosts, e.g. `sgtm.example.com`. Required for `replay-sgtm` and the MCP `debug_replay_sgtm` tool, which only send to these hosts. There is no `config.json` equivalent. |
 
 `config.json` example: `{"protectedContainers": ["GTM-XXXXXXX"], "allowPublish": false}`. With `allowPublish: false`, `gscode login` never requests the publish scope.
 
@@ -324,7 +329,7 @@ GTM-XXXXXXX - my changes/
 - **Push** checks GTM (2 requests), stops on any conflict, and checks that the files still match what you confirmed. If GTM is unchanged it fetches only what the push needs instead of a full snapshot. It reads the workspace status once more right before writing and stops if anything moved, sends one `bulk_update`, then re-reads only the entity types it touched. A one-tag edit costs about 9 to 10 requests in total. What was sent is recorded in `state.json` before the refresh, so if the refresh fails the next pull finishes the job and nothing is lost.
 - **Create Version** refuses while you have unpushed changes, while a newer published version has not been pulled in, or if GTM's workspace status changed since your last pull. Then it turns the workspace into a container version. GTM replaces the workspace and GS Code follows the new one. If that fails (free accounts allow 3 workspaces), use Switch Workspace.
 - **Auto-pull** checks every 60 s by default (minimum 15), plus on window focus and when a mirror opens. After 10 checks in a row with nothing new the interval doubles, up to 4 times the setting; any change, focus or command resets it. Each delay has ±10% jitter so teammates' mirrors do not poll in step. Failed checks back off exponentially up to 10 minutes. Being signed out, a deleted workspace or the daily quota stop it until you act. Auto-pull never syncs the workspace to a newer version or writes to GTM; it tells you a version was published.
-- **Lock.** Pull, Push, Create Version, Switch Workspace and tidy take `.gtm/lock`, so the CLI, `gscode watch`, several VS Code windows and agents never write the same mirror at once. Others wait up to 30 s; a background check skips its turn instead of waiting. A lock older than 15 minutes, or held by a process that no longer exists on this machine, is ignored.
+- **Lock.** Pull, Push, Create Version, Switch Workspace and tidy take `.gtm/lock`, so the CLI, `gscode watch`, several VS Code windows and agents never write the same mirror at once. Others wait up to 30 s; a background check skips its turn instead of waiting. The process holding the lock refreshes it every 60 s, so a long push is never taken for a crash. A lock not refreshed for 15 minutes, or held by a process that no longer exists on this machine, is cleared. An empty or unreadable lock (left by a crash mid-write) is cleared once it is about 5 s old. Each lock carries a random token, and a process only ever removes its own. Short-lived `.gtm/lock.<id>.tmp` and `.gtm/lock.guard` files can appear while the lock changes hands.
 - **Quota.** The Tag Manager API allows 25 requests per 100 seconds per Google Cloud project. GS Code paces itself with a sliding window whose request history the CLI and the extension share (`ratelimit.json` in the CLI config folder) and retries with backoff on quota errors.
 
 > **Keep mirrors of real containers out of public repos.** A mirror folder contains your container's full configuration. If you version it with git, use a private repository.
@@ -339,7 +344,8 @@ How the debugger is built: [docs/debugger-design.md](docs/debugger-design.md).
 - Google tag (gtag) configs have no name, so their files are named by id.
 - Zones are only available on GTM 360 accounts.
 - **Windows:** file mode 600 on the CLI's credential files does nothing, so they are protected only by your user profile's permissions. File names are capped at 120 bytes, but deep folders can still exceed the 260-character path limit; keep mirrors near the drive root or enable long paths.
-- **Server-side preview:** GS Code cannot read sGTM preview internals. It predicts which client claims a request and can replay requests into your own sGTM preview, where you see the result.
+- **Server-side preview:** GS Code cannot read sGTM preview internals. It predicts which client claims a request and can replay requests into your own sGTM preview, where you see the result. Replay needs your sGTM hosts configured and sends real requests (tags run, vendors receive them). A GA4 hit to some other non-Google host is still marked `(1p)` but is not replayed.
+- **Debugger URLs:** only `http://` and `https://` pages (and `about:blank`) can be debugged; `file:`, `chrome:` and other schemes are refused.
 - **Offline explanations:** trigger conditions using `cssSelector` (and other element matches) are not evaluated; the explanation says they are unknown.
 - **Variables read "now":** Custom JavaScript, JavaScript variable, cookie and DOM element variables are evaluated in the page when you ask, not at the time of the event, so their values can differ from what GTM saw.
 

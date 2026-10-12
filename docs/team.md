@@ -90,6 +90,21 @@ Everyone signs in with their own Google account; tokens stay on their own machin
 
 A mirror holds your container's full configuration: ids, endpoints, custom code, sometimes tokens pasted into tags. **Keep mirrors in private repositories.** Do not put them in this project's repo or any public one.
 
-Keep `gsCode.protectedContainers` (or `~/.config/gs-code/config.json` / `GSCODE_PROTECTED` for the CLI) in each person's own settings, not in the shared repo, so a clone cannot switch off someone's protection.
+## Settings each person sets for themselves
+
+Some settings only count in your own **User** settings (or Remote settings), never in a shared repo's `.vscode/settings.json`. VS Code ignores a workspace value for them, so a cloned repo cannot switch off someone's protection or point their debugger at another browser:
+
+- `gsCode.protectedContainers` and `gsCode.allowPublish`: User settings only. Each person adds the containers they want protected. The CLI reads `protectedContainers` from `~/.config/gs-code/config.json` or `GSCODE_PROTECTED`.
+- `gsCode.debug.browserPath` and `gsCode.debug.browserUrl`: User or Remote settings only.
+
+## Cloned repos open in Restricted Mode
+
+When VS Code asks whether you trust the authors of a freshly cloned folder and you choose not to, it opens in Restricted Mode. GS Code still shows the mirror, its changes and diffs, and **Pull** works. It refuses anything that writes to GTM or starts a browser, with `GS Code does not <action> in Restricted Mode. Trust this workspace first (Manage Workspace Trust).`:
+
+- Push, Create Version, Create Version and Publish, and Versions (publish or roll back);
+- starting the debugger browser (launch or attach);
+- the agent tools `gtm_push`, `debug_start` and `debug_replay_sgtm`.
+
+A workspace value of `gsCode.debug.sgtmHosts` is also ignored until you trust the folder. Review what the repo contains, then trust it with **Manage Workspace Trust**.
 
 For running checks and pushes from GitHub Actions, see [ci.md](ci.md).

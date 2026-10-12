@@ -53,7 +53,7 @@ describe('init / pull', () => {
     expect(await readFile(path.join(root, 'variables/cJS - page type.js'), 'utf8')).toContain('return "home"');
     expect(await readFile(path.join(root, 'templates/Hash Email/code.js'), 'utf8')).toBe('return data.email;');
     expect(await readJson('folders.json')).toEqual([{ name: 'GA4' }]);
-    expect(await readJson('built-in-variables.json')).toEqual(['EVENT', 'PAGE_URL']);
+    expect(await readJson('built-in-variables.json')).toEqual(['event', 'pageUrl']);
     await expectClean();
   });
 
@@ -133,11 +133,11 @@ describe.each(['bulk', 'sequential'] as const)('push (%s)', (strategy) => {
     const { folder: _f, ...unfoldered } = tag;
     await writeJson('tags/GA4 - purchase.json', unfoldered);
     await writeJson('folders.json', []);
-    await writeJson('built-in-variables.json', ['PAGE_URL', 'CLICK_URL']);
+    await writeJson('built-in-variables.json', ['pageUrl', 'clickUrl']);
     await push(strategy);
     expect(gtm.find('tag', 'cHTML - hello')).toBeUndefined();
     expect(gtm.find('folder', 'GA4')).toBeUndefined();
-    expect([...gtm.builtIns].sort()).toEqual(['CLICK_URL', 'PAGE_URL']);
+    expect([...gtm.builtIns].sort()).toEqual(['clickUrl', 'pageUrl']);
     await expectClean();
   });
 

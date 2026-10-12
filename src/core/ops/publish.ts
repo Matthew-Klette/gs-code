@@ -130,7 +130,11 @@ async function publishOrError(api: GtmApi, state: MirrorState, versionId: string
     const published = await api.publishVersion(state.container.accountId, state.container.containerId, versionId);
     return published.compilerError ? 'GTM reported a compiler error' : undefined;
   } catch (error: unknown) {
-    return `${message(error)} (sign in with allowPublish enabled if the token lacks the publish scope)`;
+    // Only a 403 can mean the token lacks the publish scope; any other failure gets no hint.
+    if (error instanceof GtmError && error.status === 403) {
+      return `${message(error)} (sign in with allowPublish enabled if the token lacks the publish scope)`;
+    }
+    return message(error);
   }
 }
 

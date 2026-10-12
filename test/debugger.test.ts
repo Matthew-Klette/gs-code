@@ -276,10 +276,11 @@ describe('server-side preview replay and local sGTM', async () => {
   it('replays a captured first-party hit with the header and its body', async () => {
     const hit = classifyHit('https://sgtm.shop.example/g/collect?tid=G-1', 'POST', 'en=purchase', 1)!;
     let sent: RequestInit | undefined;
-    const result = await replayWithPreview(hit, header, (async (_url: string, init: RequestInit) => {
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
       sent = init;
       return new Response('ok', { status: 200 });
-    }) as unknown as typeof fetch);
+    }) as unknown as typeof fetch;
+    const result = await replayWithPreview(hit, header, { sgtmHosts: ['sgtm.shop.example'], fetchImpl });
     expect(result.status).toBe(200);
     expect((sent?.headers as Record<string, string>)['X-Gtm-Server-Preview']).toBe(header);
     expect(sent?.body).toBe('en=purchase');
@@ -290,7 +291,9 @@ describe('server-side preview replay and local sGTM', async () => {
   it('builds the preview + tagging docker commands for the official image', () => {
     const [preview, tagging] = localSgtmCommands({ config: 'aWQ9R1RNLVhYWFgmZW52PTEmYXV0aD1hYmM=', port: 8080, previewPort: 8081 });
     expect(preview).toContain('RUN_AS_PREVIEW_SERVER=true');
-    expect(tagging).toContain('PREVIEW_SERVER_URL=http://host.docker.internal:8081');
+    expect(tagging).toContain('PREVIEW_SERVER_URL=http://gscode-sgtm-preview:8080');
+    for (const command of [preview, tagging]) expect(command?.[(command?.indexOf('--network') ?? -1) + 1]).toBe('gscode-sgtm');
+    expect(tagging).not.toContain('--add-host');
     expect(() => localSgtmCommands({ config: 'x', port: 1, previewPort: 2 })).toThrow(/CONTAINER_CONFIG/);
   });
 });

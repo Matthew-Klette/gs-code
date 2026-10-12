@@ -75,8 +75,8 @@ describe('MCP server', () => {
       { kind: 'page', t: 1, page: 1, url: 'https://shop.example/' },
       { kind: 'probe', page: 1, message: { type: 'push', t: 2, url: 'https://shop.example/', seq: 1, started: 2, data: { event: 'purchase' }, event: 'purchase' } },
     ];
-    await writeFile(path.join(root, DEBUG_DIR, 's.jsonl'), records.map((record) => JSON.stringify(record)).join('\n'));
-    await writeFile(path.join(root, DEBUG_DIR, 'latest'), 's.jsonl');
+    await writeFile(path.join(root, DEBUG_DIR, 'session-test.jsonl'), records.map((record) => JSON.stringify(record)).join('\n'));
+    await writeFile(path.join(root, DEBUG_DIR, 'latest'), 'session-test.jsonl');
     const mcp = client(kitFor());
     const events = (await mcp.call('tools/call', { name: 'debug_events', arguments: {} })).result.content[0].text as string;
     expect(events).toContain('#1 purchase');

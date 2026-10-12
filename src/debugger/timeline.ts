@@ -74,14 +74,17 @@ export class Timeline {
   static async fromFile(file: string, tagNames?: ReadonlyMap<string, string>): Promise<Timeline> {
     const timeline = new Timeline(tagNames);
     const text = await fs.readFile(file, 'utf8');
-    for (const line of text.split('\n')) {
-      if (!line.trim()) continue;
+    const lines = text.split('\n').filter((line) => line.trim());
+    let unreadable = 0;
+    lines.forEach((line, index) => {
       try {
         timeline.apply(JSON.parse(line) as SessionRecord);
       } catch {
-        // a half-written last line while the session is still running
+        // A half-written last line is expected while the session is still running; anything else is damage.
+        if (index < lines.length - 1) unreadable++;
       }
-    }
+    });
+    if (unreadable) timeline.notes.push({ t: Date.now(), level: 'warning', message: `Skipped ${unreadable} unreadable line${unreadable === 1 ? '' : 's'} in ${file}.` });
     return timeline;
   }
 

@@ -11,6 +11,7 @@ import { DebugSession } from '../debugger/session';
 import { Timeline } from '../debugger/timeline';
 import { DEBUG_DIR } from '../debugger/toolkit';
 import { VariableResolver } from '../debugger/variables';
+import { containedFile, parseWebviewMessage, untrustedMessage, type FromWebview } from './guards';
 
 const UPDATE_MS = 250;
 
@@ -38,15 +39,6 @@ export function debugSettings(context: vscode.ExtensionContext): DebugSettings {
     tagStatus: section.get<boolean>('tagStatus', true),
   };
 }
-
-type FromWebview =
-  | { type: 'ready' }
-  | { type: 'start'; url: string; mode: 'workspace' | 'live' }
-  | { type: 'stop' | 'reload' | 'openLast' }
-  | { type: 'navigate'; url: string }
-  | { type: 'select'; seq: number; live?: boolean }
-  | { type: 'openFile'; file: string }
-  | { type: 'push'; json: string };
 
 /** The "GS Code Debugger" panel for one mirror: drives a DebugSession and shows its timeline. */
 export class DebugPanel implements vscode.Disposable {
@@ -91,12 +83,22 @@ export class DebugPanel implements vscode.Disposable {
     });
     this.panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
     this.panel.webview.html = this.html(media);
-    this.panel.webview.onDidReceiveMessage((message: FromWebview) => void this.onMessage(message).catch((error: unknown) => this.error(error)), null, this.disposables);
+    this.panel.webview.onDidReceiveMessage(
+      (raw: unknown) => {
+        const message = parseWebviewMessage(raw);
+        if (!message) return void this.output.appendLine(`Debugger: ignored an unexpected message from the panel: ${JSON.stringify(raw)?.slice(0, 200)}`);
+        void this.onMessage(message).catch((error: unknown) => this.error(error));
+      },
+      null,
+      this.disposables,
+    );
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
   /** Start from a command (or an agent tool) without going through the webview form. */
   async start(url: string, mode: 'workspace' | 'live'): Promise<DebugSession> {
+    const untrusted = untrustedMessage(vscode.workspace.isTrusted, 'launch or attach a debug browser');
+    if (untrusted) throw new Error(untrusted);
     await this.session?.stop();
     const state = await readState(this.root);
     const docs = await loadMirrorDocs(this.root, state);
@@ -176,8 +178,8 @@ export class DebugPanel implements vscode.Disposable {
         await this.postDetail(message.seq, message.live === true);
         return;
       case 'openFile': {
-        const file = path.join(this.root, message.file);
-        if (!file.startsWith(this.root + path.sep)) return;
+        const file = await containedFile(this.root, message.file);
+        if (!file) return void this.output.appendLine(`Debugger: not opening "${message.file}" (missing or outside the mirror).`);
         await vscode.window.showTextDocument(vscode.Uri.file(file), { viewColumn: vscode.ViewColumn.One, preview: false });
         return;
       }
@@ -225,7 +227,7 @@ export class DebugPanel implements vscode.Disposable {
       })),
       notes: timeline.notes.slice(-20),
     });
-    if (this.selected !== undefined) void this.postDetail(this.selected, false);
+    if (this.selected !== undefined) void this.postDetail(this.selected, false).catch((error: unknown) => this.error(error));
   }
 
   private async postDetail(seq: number, live: boolean): Promise<void> {
