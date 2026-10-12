@@ -46,8 +46,6 @@
   },
   "files": [
     "dist/cli.js",
-    "dist/extension.js",
-    "media/icon.png",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -305,7 +303,64 @@
           "markdownDescription": "Seconds between background checks for GTM changes (minimum 15). The GTM API allows 25 requests per 100 seconds per Google Cloud project; at 60 s a check uses about 3."
         }
       }
-    }
+    },
+    "walkthroughs": [
+      {
+        "id": "getStarted",
+        "title": "Get started with GS Code",
+        "description": "Edit a Google Tag Manager workspace as files: set up once, then pull, edit and push.",
+        "steps": [
+          {
+            "id": "oauthClient",
+            "title": "Create your OAuth client",
+            "description": "One time, about 10 minutes, free.\n[Open Google Cloud Console](https://console.cloud.google.com/apis/library/tagmanager.googleapis.com)",
+            "media": {
+              "markdown": "media/walkthrough/oauth-client.md"
+            }
+          },
+          {
+            "id": "configure",
+            "title": "Configure and sign in",
+            "description": "Pick the downloaded JSON, then sign in.\n[Configure OAuth Client](command:gsCode.configureClient)\n[Sign In](command:gsCode.signIn)",
+            "media": {
+              "markdown": "media/walkthrough/sign-in.md"
+            },
+            "completionEvents": [
+              "onCommand:gsCode.signIn"
+            ]
+          },
+          {
+            "id": "open",
+            "title": "Open a workspace",
+            "description": "Mirror a GTM workspace into a folder, or adopt a folder from git.\n[Open Workspace…](command:gsCode.open)\n[Adopt Folder…](command:gsCode.adoptFolder)",
+            "media": {
+              "markdown": "media/walkthrough/open.md"
+            },
+            "completionEvents": [
+              "onCommand:gsCode.open",
+              "onCommand:gsCode.adoptFolder"
+            ]
+          },
+          {
+            "id": "editPush",
+            "title": "Edit, review, push",
+            "description": "Edit files, review in Source Control, then push to the workspace.\n[Show Source Control](command:workbench.view.scm)",
+            "media": {
+              "markdown": "media/walkthrough/edit-push.md"
+            },
+            "completionEvents": [
+              "onCommand:gsCode.push"
+            ]
+          }
+        ]
+      }
+    ],
+    "viewsWelcome": [
+      {
+        "view": "scm",
+        "contents": "Edit a Google Tag Manager workspace as files with GS Code.\n[Open GTM Workspace…](command:gsCode.open)\n[Adopt a Folder…](command:gsCode.adoptFolder)\nFirst time? [Get started](command:workbench.action.openWalkthrough?%5B%22matthew-klette.gs-code%23getStarted%22%5D)"
+      }
+    ]
   },
   "scripts": {
     "build": "node esbuild.mjs",
